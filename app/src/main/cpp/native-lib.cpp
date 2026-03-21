@@ -123,6 +123,39 @@ Java_com_example_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */,
 
 
 
+void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int markerPixelY) {
+    // Draw a yellow arrow marker directly on the window buffer above the spectrum
+    if (markerPixelX < 0 || markerPixelX >= surfaceWidth) return;
+    
+    const uint32_t YELLOW = 0xFF00FFFF;  // ARGB format: yellow
+    const int ARROW_HEIGHT = 30;
+    const int ARROW_WIDTH = 10;
+    
+    // Draw vertical line
+    for (int y = markerPixelY - ARROW_HEIGHT; y < markerPixelY; y++) {
+        if (y >= 0) {
+            for (int x = markerPixelX - ARROW_WIDTH / 2; x <= markerPixelX + ARROW_WIDTH / 2; x++) {
+                if (x >= 0 && x < surfaceWidth) {
+                    dest[y * stride + x] = YELLOW;
+                }
+            }
+        }
+    }
+    
+    // Draw arrow head (downward pointing triangle)
+    int tipY = markerPixelY - 1;
+    for (int y = tipY - 8; y <= tipY; y++) {
+        if (y >= 0) {
+            int offset = tipY - y;
+            for (int x = markerPixelX - offset; x <= markerPixelX + offset; x++) {
+                if (x >= 0 && x < surfaceWidth) {
+                    dest[y * stride + x] = YELLOW;
+                }
+            }
+        }
+    }
+}
+
 uint32_t getColor(double intensity) {
     // intensity is already normalized to 0-255 range from the caller
     
@@ -339,9 +372,23 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         if (ANativeWindow_lock(window, &buffer_out, nullptr) == 0) {
             if (buffer_out.width >= surfaceWidth && buffer_out.height >= surfaceHeight) {
                 uint32_t* dest = (uint32_t*)buffer_out.bits;
+                
+                // Draw spectrum data
                 for (int y = 0; y < surfaceHeight; y++) {
                     memcpy(&dest[y * buffer_out.stride], &waterfallBuffer[y * surfaceWidth], surfaceWidth * sizeof(uint32_t));
                 }
+                
+                // Draw +8kHz marker arrow above the spectrum (with some margin)
+                int markerX;
+                int markerYTop = 5;  // 5 pixels from top as anchor point
+                if (zoomEnabled) {
+                    // Zoom mode: ±12 kHz span, +8kHz is at 5/6 position
+                    markerX = (surfaceWidth * 7) / 9;
+                } else {
+                    // Normal mode: ±24 kHz span, +8kHz is at 7/12 position  
+                    markerX = (surfaceWidth * 7) / 11;
+                }
+                drawArrowMarkerOnWindow(dest, buffer_out.stride, markerX, markerYTop);
             }
             ANativeWindow_unlockAndPost(window);
         }
