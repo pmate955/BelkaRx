@@ -74,26 +74,6 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/sensitivityLabel" />
 
-    <CheckBox
-        android:id="@+id/monoModeCheckBox"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="8dp"
-        android:text="Mono Mode"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/swapIQCheckBox" />
-
-    <CheckBox
-        android:id="@+id/stereoAverageModeCheckBox"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="8dp"
-        android:checked="false"
-        android:text="Stereo Avg (Mic)"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/monoModeCheckBox" />
 
     <SurfaceView
         android:id="@+id/waterfallSurface"
@@ -103,6 +83,6 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/stereoAverageModeCheckBox" />
+        app:layout_constraintTop_toBottomOf="@+id/swapIQCheckBox" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

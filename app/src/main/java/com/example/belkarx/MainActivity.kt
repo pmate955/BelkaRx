@@ -76,21 +76,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Swap I/Q checkbox changed: $isChecked")
         }
 
-        binding.monoModeCheckBox.setOnCheckedChangeListener { _, isChecked ->
-            setMonoMode(isChecked)
-            Log.d("BelkaRx", "Mono Mode checkbox changed: $isChecked")
-        }
-
-        binding.stereoAverageModeCheckBox.setOnCheckedChangeListener { _, isChecked ->
-            setStereoAverageMode(isChecked)
-            Log.d("BelkaRx", "Stereo Average Mode checkbox changed: $isChecked")
-        }
-
         setSensitivity(binding.sensitivitySeekBar.progress)
         setSwapIQ(binding.swapIQCheckBox.isChecked)
-        setMonoMode(binding.monoModeCheckBox.isChecked)
-        setStereoAverageMode(binding.stereoAverageModeCheckBox.isChecked)
-        Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQCheckBox.isChecked}, Mono Mode=${binding.monoModeCheckBox.isChecked}")
+        Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQCheckBox.isChecked}")
 
 
     }
@@ -521,8 +509,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setSensitivity(value: Int)
     private external fun setNativeSampleRate(rate: Int)
     private external fun setSwapIQ(swap: Boolean)
-    private external fun setMonoMode(mono: Boolean)
-    private external fun setStereoAverageMode(stereo: Boolean)
 
     // Oboe native methods
     private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean

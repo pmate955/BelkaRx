@@ -20,8 +20,10 @@ std::vector<uint32_t> waterfallBuffer;
 int sensitivityValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
-bool monoModeEnabled = false;  // If true, use only left channel (mono)
-bool stereoAverageEnabled = false;  // If true, average L+R channels; if false, use I/Q magnitude
+
+// Spectrum gain smoothing
+double smoothedMinMag = 110.0;
+double smoothedMaxMag = 170.0;
 
 // Oboe capture state
 OboeCapture* g_audioCapture = nullptr;
@@ -90,50 +92,37 @@ Java_com_example_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */,
     LOGI("setSwapIQ: %d", (int)swap);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setMonoMode(JNIEnv* env, jobject /* this */, jboolean mono) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    monoModeEnabled = mono;
-    LOGI("setMonoMode: %d", (int)mono);
-}
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setStereoAverageMode(JNIEnv* env, jobject /* this */, jboolean stereo) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    stereoAverageEnabled = stereo;
-    LOGI("setStereoAverageMode: %d", (int)stereo);
-}
 
-uint32_t getColor(double magnitude) {
-    // magnitude comes as logMag in dB scale: 20*log10(mag)+120
-    // Typical range observed: 100-160 dB
-    // We need to map this full observed range to 0-255 for better contrast
+
+
+uint32_t getColor(double intensity) {
+    // intensity is already normalized to 0-255 range from the caller
     
-    double intensity = magnitude;
-    
-    // If this looks like a logMag value (>60 indicates dB scale with our 120 offset)
-    if (magnitude > 60) {
-        // Map typical range 90-170 to 0-255 for maximum contrast
-        // This gives us full use of the color palette
-        intensity = (magnitude - 90.0) / 80.0 * 255.0;
-        if (intensity < 0) intensity = 0;
-        if (intensity > 255) intensity = 255;
-    }
-    
-    // Apply sensitivity adjustment (subtle)
-    intensity = intensity + (sensitivityValue - 100) * 0.3;
     if (intensity < 0) intensity = 0;
     if (intensity > 255) intensity = 255;
 
+    // Apply sensitivity adjustment
+    intensity = intensity + (sensitivityValue - 100) * 0.8;
+    if (intensity < 0) intensity = 0;
+    if (intensity > 255) intensity = 255;
+
+    // Apply logarithmic curve to emphasize low values (noise) as black
+    intensity = intensity / 255.0;  // Normalize to 0-1
+    intensity = pow(intensity, 1.5);  // Exponential curve: pushes low values toward 0
+    intensity = intensity * 255.0;  // Scale back to 0-255
+
     int intensityInt = (int)intensity;
     
-    if (intensityInt < 128) {
-        // Blue -> Green gradient
-        return 0xFF000000 | (intensityInt * 2 << 8) | (intensityInt > 64 ? (intensityInt - 64) * 4 : 0);
-    } else {
-        // Green -> Red gradient
-        return 0xFF000000 | (255 << 16) | ((255 - (intensityInt - 128) * 2) << 8);
+    // Debug logging (every 100 calls)
+    static int colorCallCount = 0;
+    if (++colorCallCount % 100 == 0) {
+        LOGI("getColor: intensityInt=%d (0-255 scale, after curve)", intensityInt);
     }
+    
+    // Monochrome palette: black -> dark gray -> light gray -> white
+    uint8_t gray = (uint8_t)intensityInt;
+    return 0xFF000000 | (gray << 16) | (gray << 8) | gray;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -160,13 +149,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (monoModeEnabled) {
-            // MONO MODE: Use only left channel (I component only, imaginary = 0)
-            for (int i = 0; i < fftSize; i++) {
-                real[i] = buffer[2 * i] / 32768.0;  // Left channel
-                imag[i] = 0.0;                      // No imaginary part
-            }
-        } else if (swapIQEnabled) {
+        if (swapIQEnabled) {
             for (int i = 0; i < fftSize; i++) {
                 // I/Q handling: real = Q, imag = I
                 real[i] = buffer[2 * i + 1] / 32768.0;
@@ -175,7 +158,6 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         } else {
             for (int i = 0; i < fftSize; i++) {
                 // Stereo interpretation: left = I (Real), right = Q (Imaginary)
-                // Combine stereo channels: average them for magnitude computation
                 double leftSample = buffer[2 * i] / 32768.0;
                 double rightSample = buffer[2 * i + 1] / 32768.0;
                 
@@ -212,16 +194,8 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         double mag128 = sqrt(real[128]*real[128] + imag[128]*imag[128]);
         double mag512 = sqrt(real[512]*real[512] + imag[512]*imag[512]);
         
-        LOGI("FFT Check #%d [MONO=%d SWAP=%d STEREO_AVG=%d]: mag[0]=%.6f, mag[128]=%.6f, mag[512]=%.6f, real[0]=%.6f, imag[0]=%.6f",
-             fftCheckCount, (int)monoModeEnabled, (int)swapIQEnabled, (int)stereoAverageEnabled, mag0, mag128, mag512, real[0], imag[0]);
-        
-        // Mono mode validation: imag should be 0 or very close
-        if (monoModeEnabled) {
-            double imagMag = fabs(imag[0]);
-            if (imagMag > 0.001) {
-                LOGI("WARNING: Mono mode enabled but imag[0]=%.6f (not zero!)", imag[0]);
-            }
-        }
+        LOGI("FFT Check #%d [SWAP=%d]: mag[0]=%.6f, mag[128]=%.6f, mag[512]=%.6f, real[0]=%.6f, imag[0]=%.6f",
+             fftCheckCount, (int)swapIQEnabled, mag0, mag128, mag512, real[0], imag[0]);
     }
 
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -244,48 +218,49 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
 
     // Draw new line
     double minMag = 1e9, maxMag = -1e9;
+    
+    // First pass: calculate min/max for current frame
+    std::vector<double> lineMagnitudes(surfaceWidth);
     for (int x = 0; x < surfaceWidth; x++) {
         int binIdxInSpan = (x * visibleBins) / surfaceWidth;
         int binIdx = startBin + binIdxInSpan;
         
         // Wrap bin index to handle negative frequencies
         int shiftedBin = binIdx;
-        if (shiftedBin < 0) shiftedBin += fftSize;  // Negative frequencies wrap to upper bins
-        if (shiftedBin >= fftSize) shiftedBin -= fftSize;  // Clamp to valid range
+        if (shiftedBin < 0) shiftedBin += fftSize;
+        if (shiftedBin >= fftSize) shiftedBin -= fftSize;
 
-        double mag;
-        
-        if (monoModeEnabled) {
-            // MONO MODE: Use only I (real) component magnitude
-            mag = fabs(real[shiftedBin]);
-        } else if (swapIQEnabled) {
-            // SWAP I/Q: real = Q (from right), imag = I (from left)
-            // Still use magnitude of complex pair
-            mag = sqrt(real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin]);
-        } else if (stereoAverageEnabled) {
-            // STEREO AVERAGE MODE: Average the magnitude of left and right channels
-            // Since real[i] = left[i] and imag[i] = right[i]
-            double leftMag = fabs(real[shiftedBin]);
-            double rightMag = fabs(imag[shiftedBin]);
-            mag = (leftMag + rightMag) / 2.0;  // Average amplitude
-        } else {
-            // I/Q magnitude (default): sqrt(I^2 + Q^2)
-            mag = sqrt(real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin]);
-        }
-        
+        // I/Q magnitude: sqrt(I^2 + Q^2)
+        double mag = sqrt(real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin]);
         double logMag = 20 * log10(mag + 1e-6) + 120;
         
+        lineMagnitudes[x] = logMag;
         if (logMag < minMag) minMag = logMag;
         if (logMag > maxMag) maxMag = logMag;
+    }
+    
+    // Smooth the min/max with exponential filter (time constant ~0.5 seconds at 24fps)
+    double alpha = 0.4;  // Smoothing factor: lower = slower changes
+    smoothedMinMag = smoothedMinMag * (1.0 - alpha) + minMag * alpha;
+    smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
+    
+    // Second pass: draw with normalized intensity using smoothed min/max
+    for (int x = 0; x < surfaceWidth; x++) {
+        double logMag = lineMagnitudes[x];
         
-        waterfallBuffer[x] = getColor(logMag);
+        // Normalize intensity to 0-255 based on smoothed min/max
+        double range = smoothedMaxMag - smoothedMinMag + 1e-6;  // Avoid division by zero
+        double normalizedIntensity = (logMag - smoothedMinMag) / range * 255.0;
+        normalizedIntensity = fmax(0.0, fmin(255.0, normalizedIntensity));
+        
+        waterfallBuffer[x] = getColor(normalizedIntensity);
     }
     static int drawCount = 0;
     if (++drawCount % 10 == 0) {
         // Log first few FFT bins to see actual magnitude values
-        const char* mode = monoModeEnabled ? "MONO" : (swapIQEnabled ? "I/Q_SWAP" : (stereoAverageEnabled ? "STEREO_AVG" : "I/Q"));
-        LOGI("FFT Draw #%d [%s]: minMag=%.1f, maxMag=%.1f, range=%.1f, sampleRate=%d, bins: [%.1f, %.1f, %.1f, %.1f, %.1f]",
-             drawCount, mode, minMag, maxMag, maxMag - minMag, currentSampleRate,
+        const char* mode = swapIQEnabled ? "I/Q_SWAP" : "I/Q";
+        LOGI("FFT Draw #%d [%s]: frameMag=[%.1f-%.1f], smoothedMag=[%.1f-%.1f], bins: [%.1f, %.1f, %.1f, %.1f, %.1f]",
+             drawCount, mode, minMag, maxMag, smoothedMinMag, smoothedMaxMag,
              20*log10(fabs(sqrt(real[0]*real[0]+imag[0]*imag[0]))+1e-6)+120,
              20*log10(fabs(sqrt(real[1]*real[1]+imag[1]*imag[1]))+1e-6)+120,
              20*log10(fabs(sqrt(real[256]*real[256]+imag[256]*imag[256]))+1e-6)+120,
