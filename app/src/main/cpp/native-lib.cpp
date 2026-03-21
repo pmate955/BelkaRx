@@ -100,7 +100,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
     std::lock_guard<std::mutex> lock(g_mutex);
     colorScale = scale;
-    const char* scaleNames[] = {"Grayscale", "Black-Blue", "Blue-Green-Red"};
+    const char* scaleNames[] = {"Blue-Green-Red", "Black-Blue", "Grayscale"};
     if (scale >= 0 && scale < 3) {
         LOGI("setColorScale: %d (%s)", scale, scaleNames[scale]);
     }
@@ -172,17 +172,6 @@ uint32_t getColor(double intensity) {
     uint8_t r, g, b;
     
     if (colorScale == 0) {
-        // Grayscale: black -> white
-        uint8_t gray = (uint8_t)intensityInt;
-        r = gray;
-        g = gray;
-        b = gray;
-    } else if (colorScale == 1) {
-        // Black-Blue: black (0,0,0) -> blue (0,0,255)
-        r = 0;
-        g = 0;
-        b = (uint8_t)intensityInt;
-    } else {  // colorScale == 2
         // Blue-Green-Red: blue (0,0,255) at low -> green (0,255,0) at mid -> red (255,0,0) at high
         double norm = intensityInt / 255.0;
         if (norm < 0.5) {
@@ -198,6 +187,17 @@ uint32_t getColor(double intensity) {
             g = (uint8_t)((1.0 - t) * 255);
             b = 0;
         }
+    } else if (colorScale == 1) {
+        // Black-Blue: black (0,0,0) -> blue (0,0,255)
+        r = 0;
+        g = 0;
+        b = (uint8_t)intensityInt;
+    } else {  // colorScale == 2
+        // Grayscale: black -> white
+        uint8_t gray = (uint8_t)intensityInt;
+        r = gray;
+        g = gray;
+        b = gray;
     }
     
     return 0xFF000000 | (b << 16) | (g << 8) | r;
@@ -561,24 +561,6 @@ Java_com_example_belkarx_MainActivity_stopOboeCapture(JNIEnv* env, jobject /* th
     }
 
     LOGI("Oboe capture stopped");
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_belkarx_MainActivity_isOboeRunning(JNIEnv* env, jobject /* this */) {
-    if (g_audioCapture == nullptr) return JNI_FALSE;
-    return g_audioCapture->isRunning() ? JNI_TRUE : JNI_FALSE;
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_example_belkarx_MainActivity_getOboeChannels(JNIEnv* env, jobject /* this */) {
-    if (g_audioCapture == nullptr) return 0;
-    return g_audioCapture->getChannelCount();
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_example_belkarx_MainActivity_getOboeSampleRate(JNIEnv* env, jobject /* this */) {
-    if (g_audioCapture == nullptr) return 0;
-    return g_audioCapture->getSampleRate();
 }
 
 extern "C" JNIEXPORT void JNICALL

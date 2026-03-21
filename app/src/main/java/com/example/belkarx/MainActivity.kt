@@ -35,6 +35,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        
+        // Hide the action bar to save space
+        supportActionBar?.hide()
 
         binding.waterfallSurface.holder.addCallback(this)
         setupDeviceSpinner()
@@ -128,11 +131,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun setupColorScaleSpinner() {
-        val colorScales = arrayOf("Grayscale", "Black-Blue", "Blue-Green-Red")
+        val colorScales = arrayOf("Blue-Green-Red", "Black-Blue", "Grayscale")
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, colorScales)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.colorScaleSpinner.adapter = adapter
-        binding.colorScaleSpinner.setSelection(0)  // Default to Grayscale
+        binding.colorScaleSpinner.setSelection(0)  // Default to Blue-Green-Red (colored)
     }
 
     private fun checkPermission(): Boolean {
