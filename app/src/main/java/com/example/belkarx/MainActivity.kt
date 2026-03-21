@@ -1,8 +1,6 @@
 package com.example.belkarx
 
 import android.Manifest
-import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
 import android.media.AudioDeviceInfo
@@ -10,9 +8,6 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -21,13 +16,10 @@ import android.view.SurfaceHolder
 import android.widget.ArrayAdapter
 import android.widget.SeekBar
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import com.example.belkarx.databinding.ActivityMainBinding
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
@@ -36,12 +28,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val isRecording = AtomicBoolean(false)
     private var recordingThread: Thread? = null
     private var surface: Surface? = null
-
-    // SDR preferences
-    private var sampleRate = 96000
-    private val channelConfig = AudioFormat.CHANNEL_IN_STEREO
-    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-    private var bufferSize = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,7 +70,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun setupDeviceSpinner() {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
         
         // Show all input devices (native Oboe/AAudio will request unprocessed audio)
@@ -118,7 +104,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun startRecording() {
         Log.i("BelkaRx", "startRecording() called")
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
         
         val selectedDeviceIndex = binding.deviceSpinner.selectedItemPosition
@@ -391,44 +377,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         Log.i("BelkaRx", "AudioRecord processing thread stopped (reads=$readCount, processes=$processCount, stereo=$stereoCount, mono=$monoCount)")
     }
 
-    private fun initAudioRecord(device: AudioDeviceInfo, rate: Int): Boolean {
-        // DEPRECATED: This function is no longer used. The native Oboe capture is used instead.
-        Log.w("BelkaRx", "initAudioRecord() called but should not be used!")
-        return false
-    }
 
-    private fun disableAudioEffects(sessionId: Int) {
-        try {
-            if (NoiseSuppressor.isAvailable()) {
-                NoiseSuppressor.create(sessionId)?.enabled = false
-            }
-            if (AcousticEchoCanceler.isAvailable()) {
-                AcousticEchoCanceler.create(sessionId)?.enabled = false
-            }
-            if (AutomaticGainControl.isAvailable()) {
-                AutomaticGainControl.create(sessionId)?.enabled = false
-            }
-        } catch (e: Exception) {}
-    }
-
-    private fun getSourceName(source: Int): String {
-        return when(source) {
-            MediaRecorder.AudioSource.CAMCORDER -> "CAM"
-            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VR"
-            MediaRecorder.AudioSource.UNPROCESSED -> "RAW"
-            MediaRecorder.AudioSource.MIC -> "MIC"
-            10 -> "PERF"
-            else -> "S$source"
-        }
-    }
-
-    /**
-     * DEPRECATED: This function is no longer used. The native Oboe capture is used instead.
-     */
-    private fun tryAudioRecordSources(device: AudioDeviceInfo, rate: Int): Boolean {
-        Log.w("BelkaRx", "tryAudioRecordSources() called but should not be used!")
-        return false
-    }
 
     private fun stopRecording() {
         isRecording.set(false)
@@ -442,42 +391,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // stopService(Intent(this, SdrService::class.java))
         binding.startStopButton.text = "Start"
         binding.statusText.text = "Status: Idle"
-    }
-
-    private fun processAudio() {
-        // The native Oboe capture thread handles audio reading and calls processAndDraw directly.
-        // This thread just keeps the recording thread alive and responsive.
-        Log.i("BelkaRx", "processAudio() thread started - native Oboe handles reading")
-        
-        while (isRecording.get()) {
-            try {
-                Thread.sleep(100)
-            } catch (e: InterruptedException) {
-                break
-            }
-        }
-        
-        Log.i("BelkaRx", "processAudio() thread stopped")
-    }
-
-    /**
-     * AAudio-based audio processing thread.
-     * Reads stereo frames from AAudio and processes via native code.
-     */
-    private fun processAudioViaAAudio() {
-        val fftSize = 1024
-        val buffer = ShortArray(fftSize * 2)
-        
-        while (isRecording.get()) {
-            // In a real implementation, you would call a native JNI method to read
-            // from AAudio (since AAudio is C/C++ only). For now, this is a placeholder
-            // that demonstrates the intended flow. The actual audio reading happens
-            // in native code on a background thread spawned from JNI.
-            
-            // TODO: Implement native audio reading thread that calls back to processAndDraw
-            // For demonstration: sleep briefly to prevent CPU spinning
-            Thread.sleep(10)
-        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -513,9 +426,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     // Oboe native methods
     private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean
     private external fun stopOboeCapture()
-    private external fun isOboeRunning(): Boolean
-    private external fun getOboeChannels(): Int
-    private external fun getOboeSampleRate(): Int
     private external fun setOboeSurface(surface: Surface)
 
     companion object {
