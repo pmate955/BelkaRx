@@ -18,8 +18,10 @@ int surfaceWidth = 0;
 int surfaceHeight = 0;
 std::vector<uint32_t> waterfallBuffer;
 int sensitivityValue = 100;
+int contrastValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
+bool zoomEnabled = false;
 
 // Spectrum gain smoothing
 double smoothedMinMag = 110.0;
@@ -80,6 +82,20 @@ Java_com_example_belkarx_MainActivity_setSensitivity(JNIEnv* env, jobject /* thi
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setContrast(JNIEnv* env, jobject /* this */, jint value) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    contrastValue = value;
+    LOGI("setContrast: %d", value);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    zoomEnabled = (enabled == JNI_TRUE);
+    LOGI("setZoom: %s", zoomEnabled ? "true (±12kHz)" : "false (±24kHz)");
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setNativeSampleRate(JNIEnv* env, jobject /* this */, jint rate) {
     std::lock_guard<std::mutex> lock(g_mutex);
     currentSampleRate = rate;
@@ -107,9 +123,13 @@ uint32_t getColor(double intensity) {
     if (intensity < 0) intensity = 0;
     if (intensity > 255) intensity = 255;
 
-    // Apply logarithmic curve to emphasize low values (noise) as black
+    // Calculate contrast exponent: 100 = normal (1.5), lower/higher values adjust curve sharpness
+    // contrastValue ranges 0-200: 0 = 0.5 (soft), 100 = 1.5 (normal), 200 = 2.5 (sharp)
+    double contrastExponent = 0.5 + (contrastValue / 200.0) * 2.0;
+    
+    // Apply logarithmic curve with contrast adjustment
     intensity = intensity / 255.0;  // Normalize to 0-1
-    intensity = pow(intensity, 1.5);  // Exponential curve: pushes low values toward 0
+    intensity = pow(intensity, contrastExponent);  // Exponential curve: controls signal/noise ratio
     intensity = intensity * 255.0;  // Scale back to 0-255
 
     int intensityInt = (int)intensity;
@@ -167,6 +187,12 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
             }
         }
         
+        // Debug logging for contrast
+        static int contrastLogCount = 0;
+        if (++contrastLogCount % 50 == 0) {
+            LOGI("Contrast setting: contrastValue=%d", contrastValue);
+        }
+        
         // Debug: log input data samples
         static int inputLogCount = 0;
         if (++inputLogCount % 100 == 0) {
@@ -211,10 +237,12 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     // I/Q positive frequencies (0 Hz to Nyquist)
     // For I/Q signals, positive frequencies occupy bins 0..fftSize/2
     // At 96 kHz sampling: Nyquist = 48 kHz, so fftSize/2 = 1024 bins covering 0..48 kHz
-    int visibleBins = fftSize / 4;  // For 2048 FFT: 1024 bins = ±24 kHz centered at DC
+    int baseBins = fftSize / 4;  // For 2048 FFT: 1024 bins = ±24 kHz centered at DC
+    int visibleBins = zoomEnabled ? baseBins / 2 : baseBins;  // Zoom: ±12 kHz, else ±24 kHz
     int startBin = -(visibleBins / 2);  // Start from negative frequencies (centered at DC)
     
-    LOGI("Spectrum: centered at DC ±24kHz, visibleBins=%d, fftSize=%d, sampleRate=%d, dispBW=%.1f Hz", visibleBins, fftSize, currentSampleRate, (float)visibleBins * currentSampleRate / fftSize);
+    LOGI("Spectrum: centered at DC %s, visibleBins=%d, fftSize=%d, sampleRate=%d, dispBW=%.1f Hz", 
+         zoomEnabled ? "±12kHz" : "±24kHz", visibleBins, fftSize, currentSampleRate, (float)visibleBins * currentSampleRate / fftSize);
 
     // Draw new line
     double minMag = 1e9, maxMag = -1e9;

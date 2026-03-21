@@ -4,7 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:paddingTop="64dp"
+    android:paddingTop="32dp"
     tools:context=".MainActivity">
 
     <Spinner
@@ -74,6 +74,40 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/sensitivityLabel" />
 
+    <CheckBox
+        android:id="@+id/zoomCheckBox"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:checked="false"
+        android:text="Zoom (±12kHz)"
+        app:layout_constraintStart_toEndOf="@+id/swapIQCheckBox"
+        app:layout_constraintTop_toTopOf="@+id/swapIQCheckBox" />
+
+    <TextView
+        android:id="@+id/contrastLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="8dp"
+        android:text="Contrast"
+        android:textColor="@android:color/black"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/swapIQCheckBox" />
+
+    <SeekBar
+        android:id="@+id/contrastSeekBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="16dp"
+        android:layout_marginTop="8dp"
+        android:max="200"
+        android:progress="100"
+        app:layout_constraintBottom_toBottomOf="@+id/contrastLabel"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@+id/contrastLabel"
+        app:layout_constraintTop_toTopOf="@+id/contrastLabel" />
+
 
     <SurfaceView
         android:id="@+id/waterfallSurface"
@@ -83,6 +117,6 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/swapIQCheckBox" />
+        app:layout_constraintTop_toBottomOf="@+id/contrastSeekBar" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

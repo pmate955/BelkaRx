@@ -57,13 +57,28 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
+        binding.contrastSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                setContrast(progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
         binding.swapIQCheckBox.setOnCheckedChangeListener { _, isChecked ->
             setSwapIQ(isChecked)
             Log.d("BelkaRx", "Swap I/Q checkbox changed: $isChecked")
         }
 
+        binding.zoomCheckBox.setOnCheckedChangeListener { _, isChecked ->
+            setZoom(isChecked)
+            Log.d("BelkaRx", "Zoom checkbox changed: $isChecked")
+        }
+
         setSensitivity(binding.sensitivitySeekBar.progress)
+        setContrast(binding.contrastSeekBar.progress)
         setSwapIQ(binding.swapIQCheckBox.isChecked)
+        setZoom(binding.zoomCheckBox.isChecked)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQCheckBox.isChecked}")
 
 
@@ -87,6 +102,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, deviceNames)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.deviceSpinner.adapter = adapter
+        
+        // Set default selection to "Other (25)" device if available
+        val otherIndex = devices.indexOfFirst { it.type == 25 }
+        if (otherIndex >= 0) {
+            binding.deviceSpinner.setSelection(otherIndex)
+        }
         
         Log.i("BelkaRx", "Found ${devices.size} audio input devices")
         devices.forEachIndexed { index, device ->
@@ -420,8 +441,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun processAndDraw(data: ShortArray, size: Int, surface: Surface)
     private external fun setSurfaceSize(width: Int, height: Int)
     private external fun setSensitivity(value: Int)
+    private external fun setContrast(value: Int)
     private external fun setNativeSampleRate(rate: Int)
     private external fun setSwapIQ(swap: Boolean)
+    private external fun setZoom(enabled: Boolean)
 
     // Oboe native methods
     private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean
