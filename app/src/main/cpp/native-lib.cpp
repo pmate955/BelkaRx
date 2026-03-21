@@ -124,30 +124,18 @@ Java_com_example_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */,
 
 
 void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int markerPixelY) {
-    // Draw a yellow arrow marker directly on the window buffer above the spectrum
+    // Draw a yellow downward pointing arrow marker above the spectrum
     if (markerPixelX < 0 || markerPixelX >= surfaceWidth) return;
     
     const uint32_t YELLOW = 0xFF00FFFF;  // ARGB format: yellow
-    const int ARROW_HEIGHT = 30;
-    const int ARROW_WIDTH = 10;
+    const int ARROW_SIZE = 15;
     
-    // Draw vertical line
-    for (int y = markerPixelY - ARROW_HEIGHT; y < markerPixelY; y++) {
-        if (y >= 0) {
-            for (int x = markerPixelX - ARROW_WIDTH / 2; x <= markerPixelX + ARROW_WIDTH / 2; x++) {
-                if (x >= 0 && x < surfaceWidth) {
-                    dest[y * stride + x] = YELLOW;
-                }
-            }
-        }
-    }
-    
-    // Draw arrow head (downward pointing triangle)
-    int tipY = markerPixelY - 1;
-    for (int y = tipY - 8; y <= tipY; y++) {
-        if (y >= 0) {
-            int offset = tipY - y;
-            for (int x = markerPixelX - offset; x <= markerPixelX + offset; x++) {
+    // Draw downward pointing arrow head (triangle with tip at bottom)
+    for (int i = 0; i <= ARROW_SIZE; i++) {
+        int y = markerPixelY + i;
+        if (y < surfaceHeight) {
+            int width = ARROW_SIZE - i;  // Wider at top, narrower at bottom (tip)
+            for (int x = markerPixelX - width; x <= markerPixelX + width; x++) {
                 if (x >= 0 && x < surfaceWidth) {
                     dest[y * stride + x] = YELLOW;
                 }
@@ -380,7 +368,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                 
                 // Draw +8kHz marker arrow above the spectrum (with some margin)
                 int markerX;
-                int markerYTop = 5;  // 5 pixels from top as anchor point
+                int markerYTop = 0;  // Enough space for the upward arrow
                 if (zoomEnabled) {
                     // Zoom mode: ±12 kHz span, +8kHz is at 5/6 position
                     markerX = (surfaceWidth * 7) / 9;
