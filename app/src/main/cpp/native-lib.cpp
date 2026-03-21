@@ -22,6 +22,7 @@ int contrastValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
 bool zoomEnabled = false;
+int colorScale = 0;  // 0: Grayscale, 1: Black-Blue, 2: Blue-Green-Red
 
 // Spectrum gain smoothing
 double smoothedMinMag = 110.0;
@@ -96,6 +97,16 @@ Java_com_example_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, j
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    colorScale = scale;
+    const char* scaleNames[] = {"Grayscale", "Black-Blue", "Blue-Green-Red"};
+    if (scale >= 0 && scale < 3) {
+        LOGI("setColorScale: %d (%s)", scale, scaleNames[scale]);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setNativeSampleRate(JNIEnv* env, jobject /* this */, jint rate) {
     std::lock_guard<std::mutex> lock(g_mutex);
     currentSampleRate = rate;
@@ -123,9 +134,9 @@ uint32_t getColor(double intensity) {
     if (intensity < 0) intensity = 0;
     if (intensity > 255) intensity = 255;
 
-    // Calculate contrast exponent: 100 = normal (1.5), lower/higher values adjust curve sharpness
-    // contrastValue ranges 0-200: 0 = 0.5 (soft), 100 = 1.5 (normal), 200 = 2.5 (sharp)
-    double contrastExponent = 0.5 + (contrastValue / 200.0) * 2.0;
+    // Calculate contrast exponent: 100 = normal (1.833), lower/higher values adjust curve sharpness
+    // contrastValue ranges 0-300: 0 = 0.5 (soft), 100 = 1.833 (normal), 300 = 4.5 (very sharp)
+    double contrastExponent = 0.5 + (contrastValue / 300.0) * 4.0;
     
     // Apply logarithmic curve with contrast adjustment
     intensity = intensity / 255.0;  // Normalize to 0-1
@@ -133,16 +144,42 @@ uint32_t getColor(double intensity) {
     intensity = intensity * 255.0;  // Scale back to 0-255
 
     int intensityInt = (int)intensity;
+    if (intensityInt < 0) intensityInt = 0;
+    if (intensityInt > 255) intensityInt = 255;
     
-    // Debug logging (every 100 calls)
-    static int colorCallCount = 0;
-    if (++colorCallCount % 100 == 0) {
-        LOGI("getColor: intensityInt=%d (0-255 scale, after curve)", intensityInt);
+    // Apply color scale
+    uint8_t r, g, b;
+    
+    if (colorScale == 0) {
+        // Grayscale: black -> white
+        uint8_t gray = (uint8_t)intensityInt;
+        r = gray;
+        g = gray;
+        b = gray;
+    } else if (colorScale == 1) {
+        // Black-Blue: black (0,0,0) -> blue (0,0,255)
+        r = 0;
+        g = 0;
+        b = (uint8_t)intensityInt;
+    } else {  // colorScale == 2
+        // Blue-Green-Red: blue (0,0,255) at low -> green (0,255,0) at mid -> red (255,0,0) at high
+        double norm = intensityInt / 255.0;
+        if (norm < 0.5) {
+            // Blue to Green: 0 to 0.5
+            double t = norm * 2.0;  // 0 to 1
+            r = 0;
+            g = (uint8_t)(t * 255);
+            b = (uint8_t)((1.0 - t) * 255);
+        } else {
+            // Green to Red: 0.5 to 1.0
+            double t = (norm - 0.5) * 2.0;  // 0 to 1
+            r = (uint8_t)(t * 255);
+            g = (uint8_t)((1.0 - t) * 255);
+            b = 0;
+        }
     }
     
-    // Monochrome palette: black -> dark gray -> light gray -> white
-    uint8_t gray = (uint8_t)intensityInt;
-    return 0xFF000000 | (gray << 16) | (gray << 8) | gray;
+    return 0xFF000000 | (b << 16) | (g << 8) | r;
 }
 
 extern "C" JNIEXPORT void JNICALL

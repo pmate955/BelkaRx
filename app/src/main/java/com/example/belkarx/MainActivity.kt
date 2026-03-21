@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.waterfallSurface.holder.addCallback(this)
         setupDeviceSpinner()
+        setupColorScaleSpinner()
 
         binding.startStopButton.setOnClickListener {
             if (isRecording.get()) {
@@ -75,10 +76,19 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Zoom checkbox changed: $isChecked")
         }
 
+        binding.colorScaleSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                setColorScale(position)
+                Log.d("BelkaRx", "Color scale selected: $position")
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
         setSensitivity(binding.sensitivitySeekBar.progress)
         setContrast(binding.contrastSeekBar.progress)
         setSwapIQ(binding.swapIQCheckBox.isChecked)
         setZoom(binding.zoomCheckBox.isChecked)
+        setColorScale(binding.colorScaleSpinner.selectedItemPosition)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQCheckBox.isChecked}")
 
 
@@ -113,6 +123,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         devices.forEachIndexed { index, device ->
             Log.i("BelkaRx", "Device $index: ${device.productName} (type=${device.type}, id=${device.id})")
         }
+    }
+
+    private fun setupColorScaleSpinner() {
+        val colorScales = arrayOf("Grayscale", "Black-Blue", "Blue-Green-Red")
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, colorScales)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.colorScaleSpinner.adapter = adapter
+        binding.colorScaleSpinner.setSelection(0)  // Default to Grayscale
     }
 
     private fun checkPermission(): Boolean {
@@ -445,6 +463,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setNativeSampleRate(rate: Int)
     private external fun setSwapIQ(swap: Boolean)
     private external fun setZoom(enabled: Boolean)
+    private external fun setColorScale(scale: Int)
 
     // Oboe native methods
     private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean
