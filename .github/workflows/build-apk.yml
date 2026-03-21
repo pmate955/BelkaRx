@@ -4,9 +4,16 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
+      - 'build-*'
   pull_request:
     branches:
       - main
+
+permissions:
+  contents: write
+  packages: write
 
 jobs:
   build:
@@ -45,18 +52,27 @@ jobs:
           path: app/build/outputs/apk/debug/BelkaRx-build*.apk
           retention-days: 30
 
-      - name: Create GitHub Release
+      - name: Create Git Tag (only for branch pushes)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git tag -a build-${{ github.run_number }} -m "Build ${{ github.run_number }}" || true
+          git push origin build-${{ github.run_number }} 2>/dev/null || true
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          name: BelkaRx Build #${{ github.run_number }}
-          tag_name: build-${{ github.run_number }}
+          name: BelkaRx ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           body: |
-            **Build #${{ github.run_number }}**
+            **Release: ${{ github.ref_name }}**
             Commit: ${{ github.sha }}
-            Branch: ${{ github.ref }}
+            Branch/Tag: ${{ github.ref }}
           files: app/build/outputs/apk/debug/BelkaRx-build*.apk
           draft: false
           prerelease: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
