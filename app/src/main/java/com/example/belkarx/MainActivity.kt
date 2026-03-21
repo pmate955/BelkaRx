@@ -144,36 +144,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         if (!checkPermission()) return
 
-        binding.statusText.text = "Status: Starting Oboe audio capture..."
+        binding.statusText.text = "Status: Starting AudioRecord UNPROCESSED capture..."
         
-        // Use native Oboe capture - more reliable for stereo
+        // Try AudioRecord with UNPROCESSED source first
         try {
-            val sampleRate = 192000
-            setNativeSampleRate(sampleRate)
-            
-            // Use the device ID for Oboe capture (native code will request unprocessed audio)
-            val success = startOboeCapture(selectedDevice.id, sampleRate)
-            if (!success) {
-                binding.statusText.text = "Status: Error - Failed to start Oboe capture"
-                Log.e("BelkaRx", "Failed to start Oboe capture for device ${selectedDevice.id}")
+            if (!tryAudioRecordUnprocessed(selectedDevice)) {
+                binding.statusText.text = "Status: Error - Failed to start AudioRecord UNPROCESSED"
+                Log.e("BelkaRx", "Failed to start AudioRecord UNPROCESSED for device ${selectedDevice.id}")
                 
-                // Fallback to AudioRecord
-                Log.i("BelkaRx", "Trying AudioRecord as fallback")
-                if (!tryAudioRecordUnprocessed(selectedDevice)) {
+                // Fallback to Oboe
+                Log.i("BelkaRx", "Trying Oboe as fallback")
+                val sampleRate = 192000
+                setNativeSampleRate(sampleRate)
+                val success = startOboeCapture(selectedDevice.id, sampleRate)
+                if (!success) {
                     binding.statusText.text = "Status: Error - No audio source available"
                 }
                 return
             }
-            
-            isRecording.set(true)
-            binding.startStopButton.text = "Stop"
-
-            recordingThread = Thread {
-                processAudio()
-            }
-            recordingThread?.start()
-            binding.statusText.text = "Status: Oboe Running @ ${sampleRate/1000}k"
-            Log.i("BelkaRx", "Oboe capture started successfully at $sampleRate Hz on device ${selectedDevice.productName} (id=${selectedDevice.id})")
         } catch (e: Exception) {
             binding.statusText.text = "Status: Crash - ${e.message}"
             Log.e("BelkaRx", "startRecording crash: ${e.message}", e)

@@ -234,14 +234,13 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - 1) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
     }
 
-    // I/Q positive frequencies (0 Hz to 48 kHz)
-    // At 192 kHz sampling: Nyquist = 96 kHz, so 48 kHz = half the positive spectrum
-    // FFT bin 0..1024 = 0 Hz to 96 kHz (positive frequencies)
-    // For 48 kHz: bin 0..512
-    int visibleBins = fftSize / 4;  // For 2048 FFT: 512 bins covering 0..48 kHz
+    // I/Q positive frequencies (0 Hz to Nyquist)
+    // For I/Q signals, positive frequencies occupy bins 0..fftSize/2
+    // At 96 kHz sampling: Nyquist = 48 kHz, so fftSize/2 = 1024 bins covering 0..48 kHz
+    int visibleBins = fftSize / 8;  // For 2048 FFT: 1024 bins covering full positive spectrum
     int startBin = 0;  // Start from DC (0 Hz)
     
-    LOGI("Spectrum: 0..48000 Hz (positive only), visibleBins=%d, fftSize=%d", visibleBins, fftSize);
+    LOGI("Spectrum: 0..%d Hz (positive only), visibleBins=%d, fftSize=%d, sampleRate=%d", currentSampleRate/2, visibleBins, fftSize, currentSampleRate);
 
     // Draw new line
     double minMag = 1e9, maxMag = -1e9;
@@ -249,10 +248,10 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         int binIdxInSpan = (x * visibleBins) / surfaceWidth;
         int binIdx = startBin + binIdxInSpan;
         
-        // Strictly clamp to positive frequencies only (0 to visibleBins - 1)
+        // Clamp bin index to valid FFT range (0 to fftSize/2 - 1)
         int shiftedBin = binIdx;
         if (shiftedBin < 0) shiftedBin = 0;
-        if (shiftedBin >= visibleBins) shiftedBin = visibleBins - 1;
+        if (shiftedBin >= fftSize / 2) shiftedBin = fftSize / 2 - 1;
 
         double mag;
         
