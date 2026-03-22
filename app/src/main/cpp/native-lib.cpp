@@ -142,6 +142,58 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int m
             }
         }
     }
+    
+    // Draw frequency grid lines relative to the marker position (reference point)
+    // Grid lines at 5 kHz intervals, longer at 10 kHz multiples
+    const int FFT_SIZE = 2048;
+    const int BASE_BINS = FFT_SIZE / 4;  // 512 bins
+    const float HZ_PER_BIN = (float)currentSampleRate / FFT_SIZE;  // Hz per FFT bin (~46.875 Hz at 96kHz)
+    
+    int visibleBins, startBin;
+    float Hz_per_pixel;
+    
+    if (zoomEnabled) {
+        // Zoom mode: ±6 kHz centered at +8 kHz (+2 to +14 kHz displayed)
+        visibleBins = BASE_BINS / 2;  // 256 bins = 12 kHz bandwidth
+        int binFreqResolution = currentSampleRate / FFT_SIZE;
+        int targetBin = (8000 / binFreqResolution);  // +8 kHz bin position
+        startBin = targetBin - (visibleBins / 2);  // Center at +8 kHz
+    } else {
+        // Normal mode: ±12 kHz centered at DC (-12 to +12 kHz displayed)
+        visibleBins = BASE_BINS;  // 512 bins = 24 kHz bandwidth
+        startBin = -(visibleBins / 2);  // -12 kHz at the left edge
+    }
+    
+    // Calculate Hz per pixel for scaling
+    Hz_per_pixel = (float)visibleBins * HZ_PER_BIN / surfaceWidth;
+    
+    // Draw grid lines at 5 kHz intervals relative to marker position
+    for (int offsetKHz = -50; offsetKHz <= 50; offsetKHz += 5) {
+        // Calculate pixel offset from marker position
+        float pixelOffset = (offsetKHz * 1000.0f) / Hz_per_pixel;
+        int pixelX = markerPixelX + (int)(pixelOffset + 0.5f);
+        
+        // Check if within display range
+        if (pixelX < 0 || pixelX >= surfaceWidth) continue;
+        
+        // Skip marker position itself (offsetKHz == 0)
+        if (offsetKHz == 0) continue;
+        
+        // Determine line height: longer for 10 kHz multiples, shorter for 5 kHz
+        int lineHeight;
+        if (offsetKHz % 10 == 0) {
+            lineHeight = 20;  // Longer line for 10 kHz multiples
+        } else {
+            lineHeight = 10;  // Short line for 5 kHz intervals
+        }
+        
+        // Draw vertical grid line
+        for (int y = markerPixelY; y < markerPixelY + lineHeight && y < surfaceHeight; y++) {
+            if (y >= 0) {
+                dest[y * stride + pixelX] = YELLOW;
+            }
+        }
+    }
 }
 
 uint32_t getColor(double intensity) {
