@@ -107,16 +107,22 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-        binding.swapIQCheckBox.setOnCheckedChangeListener { _, isChecked ->
+        binding.swapIQToggle.setOnCheckedChangeListener { _, isChecked ->
             setSwapIQ(isChecked)
             saveSettings()
             Log.d("BelkaRx", "Swap I/Q checkbox changed: $isChecked")
         }
 
-        binding.zoomCheckBox.setOnCheckedChangeListener { _, isChecked ->
+        binding.zoomToggle.setOnCheckedChangeListener { _, isChecked ->
             setZoom(isChecked)
             saveSettings()
             Log.d("BelkaRx", "Zoom checkbox changed: $isChecked")
+        }
+
+        binding.fastWaterfallToggle.setOnCheckedChangeListener { _, isChecked ->
+            setFastWaterfall(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "Fast waterfall checkbox changed: $isChecked")
         }
 
         binding.colorScaleSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
@@ -133,10 +139,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         setSensitivity(binding.sensitivitySeekBar.progress)
         setContrast(binding.contrastSeekBar.progress)
-        setSwapIQ(binding.swapIQCheckBox.isChecked)
-        setZoom(binding.zoomCheckBox.isChecked)
+        setSwapIQ(binding.swapIQToggle.isChecked)
+        setZoom(binding.zoomToggle.isChecked)
+        setFastWaterfall(binding.fastWaterfallToggle.isChecked)
         setColorScale(binding.colorScaleSpinner.selectedItemPosition)
-        Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQCheckBox.isChecked}")
+        Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQToggle.isChecked}")
 
 
     }
@@ -169,7 +176,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val dropdownContainer = binding.dropdownDynamicArea
         
         // Remove views from their current parents safely
-        val viewsToMove = listOf(binding.deviceSpinner, binding.sensitivityView, binding.contrastView)
+        val viewsToMove = listOf(binding.colorScaleSpinner, binding.sensitivityView, binding.contrastView)
         for (v in viewsToMove) {
             (v.parent as? ViewGroup)?.removeView(v)
         }
@@ -184,22 +191,22 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
         
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            // In Landscape: Sensitivity & Contrast on top, Device in dropdown
+            // In Landscape: Sensitivity & Contrast on top, Color Scale in dropdown
             binding.sensitivityView.layoutParams = getTopParams()
             binding.contrastView.layoutParams = getTopParams(16)
             topContainer.addView(binding.sensitivityView)
             topContainer.addView(binding.contrastView)
             
-            binding.deviceSpinner.layoutParams = getDropParams()
-            dropdownContainer.addView(binding.deviceSpinner)
+            binding.colorScaleSpinner.layoutParams = getDropParams()
+            dropdownContainer.addView(binding.colorScaleSpinner)
         } else {
-            // In Portrait: Sensitivity on top, Device & Contrast in dropdown
+            // In Portrait: Sensitivity on top, Color Scale & Contrast in dropdown
             binding.sensitivityView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
             
-            binding.deviceSpinner.layoutParams = getDropParams()
+            binding.colorScaleSpinner.layoutParams = getDropParams()
             binding.contrastView.layoutParams = getDropParams()
-            dropdownContainer.addView(binding.deviceSpinner)
+            dropdownContainer.addView(binding.colorScaleSpinner)
             dropdownContainer.addView(binding.contrastView)
         }
     }
@@ -537,8 +544,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val editor = prefs.edit()
         editor.putInt("sensitivity", binding.sensitivitySeekBar.progress)
         editor.putInt("contrast", binding.contrastSeekBar.progress)
-        editor.putBoolean("swapIQ", binding.swapIQCheckBox.isChecked)
-        editor.putBoolean("zoom", binding.zoomCheckBox.isChecked)
+        editor.putBoolean("swapIQ", binding.swapIQToggle.isChecked)
+        editor.putBoolean("zoom", binding.zoomToggle.isChecked)
+        editor.putBoolean("fastWaterfall", binding.fastWaterfallToggle.isChecked)
         editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
         editor.putInt("deviceSelection", binding.deviceSpinner.selectedItemPosition)
         editor.apply()
@@ -550,13 +558,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val contrast = prefs.getInt("contrast", 100)
         val swapIQ = prefs.getBoolean("swapIQ", false)
         val zoom = prefs.getBoolean("zoom", false)
+        val fastWaterfall = prefs.getBoolean("fastWaterfall", false)
         val colorScale = prefs.getInt("colorScale", 0)
         val deviceSelection = prefs.getInt("deviceSelection", 0)
         
         binding.sensitivitySeekBar.progress = sensitivity
         binding.contrastSeekBar.progress = contrast
-        binding.swapIQCheckBox.isChecked = swapIQ
-        binding.zoomCheckBox.isChecked = zoom
+        binding.swapIQToggle.isChecked = swapIQ
+        binding.zoomToggle.isChecked = zoom
+        binding.fastWaterfallToggle.isChecked = fastWaterfall
         binding.colorScaleSpinner.setSelection(colorScale)
         
         // Set device selection if it's valid
@@ -612,6 +622,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setNativeSampleRate(rate: Int)
     private external fun setSwapIQ(swap: Boolean)
     private external fun setZoom(enabled: Boolean)
+    private external fun setFastWaterfall(enabled: Boolean)
     private external fun setColorScale(scale: Int)
 
     // Oboe native methods
@@ -622,8 +633,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean {
             // Toggle zoom on double-tap
-            val newZoomState = !binding.zoomCheckBox.isChecked
-            binding.zoomCheckBox.isChecked = newZoomState
+            val newZoomState = !binding.zoomToggle.isChecked
+            binding.zoomToggle.isChecked = newZoomState
             Log.d("BelkaRx", "Surface double-tap: toggled Zoom to $newZoomState")
             return true
         }

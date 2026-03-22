@@ -77,23 +77,34 @@
             android:layout_marginEnd="16dp"
             android:gravity="center_vertical">
 
-            <CheckBox
-                android:id="@+id/swapIQCheckBox"
+            <ToggleButton
+                android:id="@+id/swapIQToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:checked="false"
-                android:text="Swap I/Q" />
+                android:textOff="Swap I/Q"
+                android:textOn="Swap I/Q" />
 
-            <CheckBox
-                android:id="@+id/zoomCheckBox"
+            <ToggleButton
+                android:id="@+id/zoomToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:checked="false"
-                android:text="Zoom (±12kHz)" />
+                android:textOff="Zoom (±12kHz)"
+                android:textOn="Zoom (±12kHz)" />
+
+            <ToggleButton
+                android:id="@+id/fastWaterfallToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:checked="false"
+                android:textOff="Fast"
+                android:textOn="Fast" />
 
             <Spinner
-                android:id="@+id/colorScaleSpinner"
+                android:id="@+id/deviceSpinner"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
@@ -115,7 +126,7 @@
 
     <!-- Views to be moved dynamically -->
     <Spinner
-        android:id="@+id/deviceSpinner"
+        android:id="@+id/colorScaleSpinner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"

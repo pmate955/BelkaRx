@@ -22,6 +22,7 @@ int contrastValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
 bool zoomEnabled = false;
+bool fastWaterfallEnabled = false;
 int colorScale = 0;  // 0: Grayscale, 1: Black-Blue, 2: Blue-Green-Red
 
 // Spectrum gain smoothing
@@ -94,6 +95,13 @@ Java_com_example_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, j
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
     LOGI("setZoom: %s", zoomEnabled ? "true (centered @+8kHz)" : "false (±24kHz @DC)");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setFastWaterfall(JNIEnv* env, jobject /* this */, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    fastWaterfallEnabled = (enabled == JNI_TRUE);
+    LOGI("setFastWaterfall: %s", fastWaterfallEnabled ? "true" : "false");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -343,10 +351,11 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     }
 
     int TOP_MARGIN = 15;
+    int shiftRows = fastWaterfallEnabled ? 2 : 1;
 
     // Shift waterfall down
-    for (int y = surfaceHeight - 1; y > TOP_MARGIN; y--) {
-        memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - 1) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+    for (int y = surfaceHeight - 1; y >= TOP_MARGIN + shiftRows; y--) {
+        memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - shiftRows) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
     }
     
     // Clear top margin to black (fully opaque)
@@ -446,7 +455,10 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         double normalizedIntensity = (logMag - smoothedMinMag) / range * 255.0;
         normalizedIntensity = fmax(0.0, fmin(255.0, normalizedIntensity));
         
-        waterfallBuffer[TOP_MARGIN * surfaceWidth + x] = getColor(normalizedIntensity);
+        uint32_t color = getColor(normalizedIntensity);
+        for (int r = 0; r < shiftRows; r++) {
+            waterfallBuffer[(TOP_MARGIN + r) * surfaceWidth + x] = color;
+        }
     }
     static int drawCount = 0;
     if (++drawCount % 10 == 0) {
