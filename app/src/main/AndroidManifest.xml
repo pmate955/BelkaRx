@@ -17,11 +17,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.BelkaRx">
 
-        <service
-            android:name=".SdrService"
-            android:foregroundServiceType="microphone"
-            android:exported="false" />
-
         <activity
             android:name=".MainActivity"
             android:exported="true"
