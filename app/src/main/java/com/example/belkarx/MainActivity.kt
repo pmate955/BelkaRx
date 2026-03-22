@@ -11,6 +11,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
+import android.content.res.Configuration
 import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -18,6 +19,8 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowManager
+import android.widget.LinearLayout
+import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.SeekBar
 import android.widget.Toast
@@ -50,6 +53,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         // Setup gesture detector for surface double-tap
         gestureDetector = GestureDetector(this, GestureListener())
+
+        // Set initial fullscreen mode based on orientation
+        updateFullscreenMode(resources.configuration.orientation)
 
         binding.waterfallSurface.holder.addCallback(this)
         binding.waterfallSurface.setOnTouchListener { _, event ->
@@ -133,6 +139,69 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQCheckBox.isChecked}")
 
 
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateFullscreenMode(newConfig.orientation)
+    }
+
+    private fun updateFullscreenMode(orientation: Int) {
+        if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // Hide the status bar, navigation bar, and set immersive sticky mode in landscape
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
+            supportActionBar?.hide()
+        } else {
+            // Show system UI elements in portrait
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            supportActionBar?.hide() // Keep action bar hidden to save space even in portrait
+        }
+        
+        updateLayoutForOrientation(orientation)
+    }
+
+    private fun updateLayoutForOrientation(orientation: Int) {
+        val topContainer = binding.topBarCenterContainer
+        val dropdownContainer = binding.dropdownDynamicArea
+        
+        // Remove views from their current parents safely
+        val viewsToMove = listOf(binding.deviceSpinner, binding.sensitivityView, binding.contrastView)
+        for (v in viewsToMove) {
+            (v.parent as? ViewGroup)?.removeView(v)
+        }
+        
+        // Helper function for layout params
+        fun getDropParams() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(0, 16, 0, 0)
+        }
+        
+        fun getTopParams(marginStart: Int = 0) = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(marginStart, 0, 0, 0)
+        }
+        
+        if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // In Landscape: Sensitivity & Contrast on top, Device in dropdown
+            binding.sensitivityView.layoutParams = getTopParams()
+            binding.contrastView.layoutParams = getTopParams(16)
+            topContainer.addView(binding.sensitivityView)
+            topContainer.addView(binding.contrastView)
+            
+            binding.deviceSpinner.layoutParams = getDropParams()
+            dropdownContainer.addView(binding.deviceSpinner)
+        } else {
+            // In Portrait: Sensitivity on top, Device & Contrast in dropdown
+            binding.sensitivityView.layoutParams = getTopParams()
+            topContainer.addView(binding.sensitivityView)
+            
+            binding.deviceSpinner.layoutParams = getDropParams()
+            binding.contrastView.layoutParams = getDropParams()
+            dropdownContainer.addView(binding.deviceSpinner)
+            dropdownContainer.addView(binding.contrastView)
+        }
     }
 
     private fun setupDeviceSpinner() {

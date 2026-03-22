@@ -19,16 +19,18 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <Spinner
-        android:id="@+id/deviceSpinner"
+    <LinearLayout
+        android:id="@+id/topBarCenterContainer"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:orientation="horizontal"
         android:layout_marginStart="8dp"
-        android:layout_marginTop="32dp"
         android:layout_marginEnd="8dp"
+        android:gravity="center_vertical"
+        app:layout_constraintBottom_toBottomOf="@+id/toggleControlsButton"
         app:layout_constraintEnd_toStartOf="@+id/startStopButton"
         app:layout_constraintStart_toEndOf="@+id/toggleControlsButton"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toTopOf="@+id/toggleControlsButton" />
 
     <Button
         android:id="@+id/startStopButton"
@@ -60,24 +62,11 @@
             android:textSize="12sp"
             android:textColor="@android:color/holo_blue_dark" />
 
-        <TextView
-            android:id="@+id/sensitivityLabel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="16dp"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="4dp"
-            android:text="Sensitivity"
-            android:textColor="@android:color/white" />
-
-        <SeekBar
-            android:id="@+id/sensitivitySeekBar"
+        <LinearLayout
+            android:id="@+id/dropdownDynamicArea"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:layout_marginStart="16dp"
-            android:max="200"
-            android:progress="100" />
+            android:orientation="vertical" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -85,7 +74,8 @@
             android:orientation="horizontal"
             android:layout_marginTop="8dp"
             android:layout_marginStart="16dp"
-            android:layout_marginEnd="16dp">
+            android:layout_marginEnd="16dp"
+            android:gravity="center_vertical">
 
             <CheckBox
                 android:id="@+id/swapIQCheckBox"
@@ -111,25 +101,6 @@
 
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/contrastLabel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="16dp"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="4dp"
-            android:text="Contrast"
-            android:textColor="@android:color/white" />
-
-        <SeekBar
-            android:id="@+id/contrastSeekBar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="16dp"
-            android:layout_marginStart="16dp"
-            android:max="300"
-            android:progress="100" />
-
     </LinearLayout>
 
     <SurfaceView
@@ -141,5 +112,62 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/controlsContainer" />
+
+    <!-- Views to be moved dynamically -->
+    <Spinner
+        android:id="@+id/deviceSpinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp" />
+
+    <LinearLayout
+        android:id="@+id/sensitivityView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+        <TextView
+            android:id="@+id/sensitivityLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_marginTop="0dp"
+            android:layout_marginBottom="2dp"
+            android:text="Sensitivity"
+            android:textColor="@android:color/white" />
+        <SeekBar
+            android:id="@+id/sensitivitySeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:layout_marginStart="8dp"
+            android:max="200"
+            android:progress="100" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/contrastView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+        <TextView
+            android:id="@+id/contrastLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_marginTop="0dp"
+            android:layout_marginBottom="2dp"
+            android:text="Contrast"
+            android:textColor="@android:color/white" />
+        <SeekBar
+            android:id="@+id/contrastSeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:layout_marginStart="8dp"
+            android:max="300"
+            android:progress="100" />
+    </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

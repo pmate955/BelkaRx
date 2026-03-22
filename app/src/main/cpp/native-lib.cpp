@@ -342,9 +342,18 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         return;
     }
 
+    int TOP_MARGIN = 15;
+
     // Shift waterfall down
-    for (int y = surfaceHeight - 1; y > 0; y--) {
+    for (int y = surfaceHeight - 1; y > TOP_MARGIN; y--) {
         memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - 1) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+    }
+    
+    // Clear top margin to black (fully opaque)
+    for (int y = 0; y < TOP_MARGIN; y++) {
+        for (int x = 0; x < surfaceWidth; x++) {
+            waterfallBuffer[y * surfaceWidth + x] = 0xFF000000;
+        }
     }
 
     // I/Q positive frequencies (0 Hz to Nyquist)
@@ -437,7 +446,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         double normalizedIntensity = (logMag - smoothedMinMag) / range * 255.0;
         normalizedIntensity = fmax(0.0, fmin(255.0, normalizedIntensity));
         
-        waterfallBuffer[x] = getColor(normalizedIntensity);
+        waterfallBuffer[TOP_MARGIN * surfaceWidth + x] = getColor(normalizedIntensity);
     }
     static int drawCount = 0;
     if (++drawCount % 10 == 0) {
@@ -470,7 +479,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                 int markerYTop = 0;
                 if (zoomEnabled) {
                     // Zoom mode: +8 kHz is the center of display
-                    markerX = surfaceWidth / 2.4;  // Center of screen = +8 kHz
+                    markerX = surfaceWidth / 2.3;  // Center of screen = +8 kHz
                 } else {
                     // Normal mode: ±24 kHz centered at DC, +8kHz is at 7/12 position  
                     markerX = (surfaceWidth * 7) / 11.05;

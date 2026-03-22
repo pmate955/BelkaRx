@@ -5,7 +5,6 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-feature android:name="android.hardware.usb.host" />
 
     <application
@@ -18,15 +17,15 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.BelkaRx">
 
-        <!-- Service disabled - using native Oboe capture directly -->
-        <!-- <service
+        <service
             android:name=".SdrService"
             android:foregroundServiceType="microphone"
-            android:exported="false" /> -->
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
