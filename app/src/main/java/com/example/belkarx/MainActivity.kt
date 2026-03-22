@@ -11,6 +11,8 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
@@ -30,6 +32,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val isRecording = AtomicBoolean(false)
     private var recordingThread: Thread? = null
     private var surface: Surface? = null
+    private lateinit var gestureDetector: GestureDetector
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,7 +43,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // Hide the action bar to save space
         supportActionBar?.hide()
 
+        // Setup gesture detector for surface double-tap
+        gestureDetector = GestureDetector(this, GestureListener())
+
         binding.waterfallSurface.holder.addCallback(this)
+        binding.waterfallSurface.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            true
+        }
+        
         setupDeviceSpinner()
         setupColorScaleSpinner()
 
@@ -486,6 +497,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean
     private external fun stopOboeCapture()
     private external fun setOboeSurface(surface: Surface)
+
+    private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            // Toggle zoom on double-tap
+            val newZoomState = !binding.zoomCheckBox.isChecked
+            binding.zoomCheckBox.isChecked = newZoomState
+            Log.d("BelkaRx", "Surface double-tap: toggled Zoom to $newZoomState")
+            return true
+        }
+    }
 
     companion object {
         init {

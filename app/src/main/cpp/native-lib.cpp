@@ -93,7 +93,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
-    LOGI("setZoom: %s", zoomEnabled ? "true (±12kHz)" : "false (±24kHz)");
+    LOGI("setZoom: %s", zoomEnabled ? "true (centered @+8kHz)" : "false (±24kHz @DC)");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -296,11 +296,24 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     // For I/Q signals, positive frequencies occupy bins 0..fftSize/2
     // At 96 kHz sampling: Nyquist = 48 kHz, so fftSize/2 = 1024 bins covering 0..48 kHz
     int baseBins = fftSize / 4;  // For 2048 FFT: 1024 bins = ±24 kHz centered at DC
-    int visibleBins = zoomEnabled ? baseBins / 2 : baseBins;  // Zoom: ±12 kHz, else ±24 kHz
-    int startBin = -(visibleBins / 2);  // Start from negative frequencies (centered at DC)
+    int visibleBins;
+    int startBin;
     
-    LOGI("Spectrum: centered at DC %s, visibleBins=%d, fftSize=%d, sampleRate=%d, dispBW=%.1f Hz", 
-         zoomEnabled ? "±12kHz" : "±24kHz", visibleBins, fftSize, currentSampleRate, (float)visibleBins * currentSampleRate / fftSize);
+    if (zoomEnabled) {
+        // Zoom: centered at +8 kHz with ±6 kHz span (total 12 kHz width)
+        visibleBins = baseBins / 2;  // 512 bins = 12 kHz
+        int binFreqResolution = currentSampleRate / fftSize;  // Hz per bin (46.88 Hz at 96kHz)
+        int targetBin = (8000 / binFreqResolution);  // +8 kHz position in FFT
+        startBin = targetBin - (visibleBins / 2);  // Center at +8 kHz
+    } else {
+        // Normal mode: ±24 kHz centered at DC
+        visibleBins = baseBins;
+        startBin = -(visibleBins / 2);
+    }
+    
+    LOGI("Spectrum: %s, visibleBins=%d, startBin=%d, fftSize=%d, sampleRate=%d, displayBW=%.1f kHz", 
+         zoomEnabled ? "ZOOM +8kHz" : "normal ±24kHz", visibleBins, startBin, fftSize, currentSampleRate, 
+         (float)visibleBins * currentSampleRate / fftSize / 1000);
 
     // Draw new line
     double minMag = 1e9, maxMag = -1e9;
@@ -366,14 +379,15 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                     memcpy(&dest[y * buffer_out.stride], &waterfallBuffer[y * surfaceWidth], surfaceWidth * sizeof(uint32_t));
                 }
                 
-                // Draw +8kHz marker arrow above the spectrum (with some margin)
+                // Draw +8kHz marker arrow above the spectrum
+                // The marker position depends on the current zoom mode
                 int markerX;
-                int markerYTop = 0;  // Enough space for the upward arrow
+                int markerYTop = 0;
                 if (zoomEnabled) {
-                    // Zoom mode: ±12 kHz span, +8kHz is at 5/6 position
-                    markerX = (surfaceWidth * 7) / 9;
+                    // Zoom mode: +8 kHz is the center of display
+                    markerX = surfaceWidth / 2;  // Center of screen = +8 kHz
                 } else {
-                    // Normal mode: ±24 kHz span, +8kHz is at 7/12 position  
+                    // Normal mode: ±24 kHz centered at DC, +8kHz is at 7/12 position  
                     markerX = (surfaceWidth * 7) / 11;
                 }
                 drawArrowMarkerOnWindow(dest, buffer_out.stride, markerX, markerYTop);
