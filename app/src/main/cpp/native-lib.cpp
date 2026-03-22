@@ -40,13 +40,13 @@ static jobject g_mainActivityRef = nullptr;
 static jobject g_surfaceRef = nullptr;
 
 void fft(std::vector<double>& real, std::vector<double>& imag) {
-    int n = real.size();
+    size_t n = real.size();
     if (n <= 1) return;
 
     std::vector<double> real_even(n / 2), imag_even(n / 2);
     std::vector<double> real_odd(n / 2), imag_odd(n / 2);
 
-    for (int i = 0; i < n / 2; i++) {
+    for (size_t i = 0; i < n / 2; i++) {
         real_even[i] = real[2 * i];
         imag_even[i] = imag[2 * i];
         real_odd[i] = real[2 * i + 1];
@@ -56,7 +56,7 @@ void fft(std::vector<double>& real, std::vector<double>& imag) {
     fft(real_even, imag_even);
     fft(real_odd, imag_odd);
 
-    for (int i = 0; i < n / 2; i++) {
+    for (size_t i = 0; i < n / 2; i++) {
         double angle = -2.0 * M_PI * i / n;
         double wr = cos(angle);
         double wi = sin(angle);
@@ -228,13 +228,13 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int m
     }
     
     // Calculate Hz per pixel for scaling
-    Hz_per_pixel = (float)visibleBins * HZ_PER_BIN / surfaceWidth;
+    Hz_per_pixel = static_cast<float>(visibleBins) * HZ_PER_BIN / static_cast<float>(surfaceWidth);
     
     // Draw grid lines at 5 kHz intervals relative to marker position
     for (int offsetKHz = -50; offsetKHz <= 50; offsetKHz += 5) {
         // Calculate pixel offset from marker position
-        float pixelOffset = (offsetKHz * 1000.0f) / Hz_per_pixel;
-        int pixelX = markerPixelX + (int)(pixelOffset + 0.5f);
+        float pixelOffset = (static_cast<float>(offsetKHz) * 1000.0f) / Hz_per_pixel;
+        int pixelX = markerPixelX + static_cast<int>(std::lround(pixelOffset));
         
         // Check if within display range
         if (pixelX < 0 || pixelX >= surfaceWidth) continue;
@@ -346,7 +346,7 @@ uint32_t getColor(double intensity) {
         }
     } else if (colorScale == 2) {
         // Grayscale: black -> white
-        uint8_t gray = (uint8_t)intensityInt;
+        auto gray = static_cast<uint8_t>(intensityInt);
         r = gray;
         g = gray;
         b = gray;
@@ -596,7 +596,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         ANativeWindow_Buffer buffer_out;
         if (ANativeWindow_lock(window, &buffer_out, nullptr) == 0) {
             if (buffer_out.width >= surfaceWidth && buffer_out.height >= surfaceHeight) {
-                uint32_t* dest = (uint32_t*)buffer_out.bits;
+                auto* dest = static_cast<uint32_t*>(buffer_out.bits);
                 
                 // Draw spectrum data
                 for (int y = 0; y < surfaceHeight; y++) {
@@ -609,10 +609,10 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                 int markerYTop = 0;
                 if (zoomEnabled) {
                     // Zoom mode: +8 kHz is the center of display
-                    markerX = surfaceWidth / 2.325;  // Center of screen = +8 kHz
+                    markerX = static_cast<int>(std::lround(surfaceWidth / 2.325));  // Center of screen = +8 kHz
                 } else {
                     // Normal mode: ±24 kHz centered at DC, +8kHz is at 7/12 position  
-                    markerX = (surfaceWidth * 7) / 11.05;
+                    markerX = static_cast<int>(std::lround((surfaceWidth * 7) / 11.05));
                 }
                 drawArrowMarkerOnWindow(dest, buffer_out.stride, markerX, markerYTop);
             }
@@ -644,7 +644,7 @@ void audioReadingThread() {
 
     const int32_t fftSize = 2048;  // Match processAndDraw FFT size
     const int32_t framesPerRead = fftSize;
-    int16_t* buffer = new int16_t[framesPerRead * 2]; // stereo
+    auto* buffer = new int16_t[framesPerRead * 2]; // stereo
 
     jclass mainActivityClass = env->GetObjectClass(g_mainActivityRef);
     if (mainActivityClass == nullptr) {
@@ -701,12 +701,12 @@ void audioReadingThread() {
             
             if (diffSum < 100) {
                 monoDetectCount++;
-                LOGI("Read %d: MONO (diffSum=%ld) L/R[0]=(%d,%d) L/R[1]=(%d,%d) range=[%d,%d]", 
-                     readCount, diffSum, left0, right0, left1, right1, minVal, maxVal);
+                LOGI("Read %d: MONO (diffSum=%lld) L/R[0]=(%d,%d) L/R[1]=(%d,%d) range=[%d,%d]", 
+                     readCount, (long long)diffSum, left0, right0, left1, right1, minVal, maxVal);
             } else {
                 stereoDetectCount++;
-                LOGI("Read %d: STEREO (diffSum=%ld) L/R[0]=(%d,%d) L/R[1]=(%d,%d)", 
-                     readCount, diffSum, left0, right0, left1, right1);
+                LOGI("Read %d: STEREO (diffSum=%lld) L/R[0]=(%d,%d) L/R[1]=(%d,%d)", 
+                     readCount, (long long)diffSum, left0, right0, left1, right1);
             }
         }
         readCount++;
