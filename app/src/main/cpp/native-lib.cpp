@@ -119,10 +119,6 @@ Java_com_example_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */,
     LOGI("setSwapIQ: %d", (int)swap);
 }
 
-
-
-
-
 void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int markerPixelY) {
     // Draw a yellow downward pointing arrow marker above the spectrum
     if (markerPixelX < 0 || markerPixelX >= surfaceWidth) return;
@@ -474,10 +470,10 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                 int markerYTop = 0;
                 if (zoomEnabled) {
                     // Zoom mode: +8 kHz is the center of display
-                    markerX = surfaceWidth / 2;  // Center of screen = +8 kHz
+                    markerX = surfaceWidth / 2.4;  // Center of screen = +8 kHz
                 } else {
                     // Normal mode: ±24 kHz centered at DC, +8kHz is at 7/12 position  
-                    markerX = (surfaceWidth * 7) / 11;
+                    markerX = (surfaceWidth * 7) / 11.05;
                 }
                 drawArrowMarkerOnWindow(dest, buffer_out.stride, markerX, markerYTop);
             }
