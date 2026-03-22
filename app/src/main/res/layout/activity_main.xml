@@ -131,13 +131,15 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:layout_marginStart="16dp"
-        android:layout_marginEnd="16dp" />
+        android:layout_marginEnd="16dp"
+        tools:ignore="MissingConstraints" />
 
     <LinearLayout
         android:id="@+id/sensitivityView"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:orientation="vertical"
+        tools:ignore="MissingConstraints">
         <TextView
             android:id="@+id/sensitivityLabel"
             android:layout_width="wrap_content"
@@ -161,7 +163,8 @@
         android:id="@+id/contrastView"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical">
+        android:orientation="vertical"
+        tools:ignore="MissingConstraints">
         <TextView
             android:id="@+id/contrastLabel"
             android:layout_width="wrap_content"
