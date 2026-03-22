@@ -134,6 +134,65 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int m
     const uint32_t YELLOW = 0xFF00FFFF;  // ARGB format: yellow
     const int ARROW_SIZE = 15;
     
+    // Simple 3x5 font for numbers 0-9, and '+', '-'
+    const uint8_t font[12][5] = {
+        {0x7, 0x5, 0x5, 0x5, 0x7}, // 0
+        {0x2, 0x6, 0x2, 0x2, 0x7}, // 1
+        {0x7, 0x1, 0x7, 0x4, 0x7}, // 2
+        {0x7, 0x1, 0x7, 0x1, 0x7}, // 3
+        {0x5, 0x5, 0x7, 0x1, 0x1}, // 4
+        {0x7, 0x4, 0x7, 0x1, 0x7}, // 5
+        {0x7, 0x4, 0x7, 0x5, 0x7}, // 6
+        {0x7, 0x1, 0x2, 0x2, 0x2}, // 7
+        {0x7, 0x5, 0x7, 0x5, 0x7}, // 8
+        {0x7, 0x5, 0x7, 0x1, 0x7}, // 9
+        {0x0, 0x2, 0x7, 0x2, 0x0}, // 10: +
+        {0x0, 0x0, 0x7, 0x0, 0x0}  // 11: -
+    };
+
+    auto drawNum = [&](int x, int y, int num) {
+        int scale = 3; // scale font by 3x for readability
+        int cx = x;
+        auto drawChar = [&](int charIdx) {
+            for (int r = 0; r < 5; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    if ((font[charIdx][r] >> (2 - c)) & 1) {
+                        for (int sy = 0; sy < scale; ++sy) {
+                            for (int sx = 0; sx < scale; ++sx) {
+                                int px = cx + c * scale + sx;
+                                int py = y + r * scale + sy;
+                                if (px >= 0 && px < surfaceWidth && py >= 0 && py < surfaceHeight) {
+                                    dest[py * stride + px] = YELLOW;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cx += 4 * scale; 
+        };
+        
+        int numChars = 2;
+        if (std::abs(num) >= 10) numChars = 3;
+        if (std::abs(num) >= 100) numChars = 4;
+        
+        cx -= ((numChars * 4 - 1) * scale) / 2; // Center text at x
+
+        if (num > 0) drawChar(10);
+        else if (num < 0) { drawChar(11); num = -num; }
+        
+        if (num >= 100) {
+            drawChar(num / 100);
+            drawChar((num / 10) % 10);
+            drawChar(num % 10);
+        } else if (num >= 10) {
+            drawChar(num / 10);
+            drawChar(num % 10);
+        } else {
+            drawChar(num % 10);
+        }
+    };
+
     // Draw downward pointing arrow head (triangle with tip at bottom)
     for (int i = 0; i <= ARROW_SIZE; i++) {
         int y = markerPixelY + i;
@@ -197,6 +256,11 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int m
                 dest[y * stride + pixelX] = YELLOW;
             }
         }
+        
+        // Draw text for 10 kHz multiples
+        if (offsetKHz % 10 == 0) {
+            drawNum(pixelX, markerPixelY + lineHeight + 2, offsetKHz);
+        }
     }
 }
 
@@ -228,27 +292,58 @@ uint32_t getColor(double intensity) {
     uint8_t r, g, b;
     
     if (colorScale == 0) {
-        // Blue-Green-Red: blue (0,0,255) at low -> green (0,255,0) at mid -> red (255,0,0) at high
+        // Classic SDR Waterfall Rainbow: Deep Blue -> Light Blue -> Green -> Yellow -> Red
         double norm = intensityInt / 255.0;
-        if (norm < 0.5) {
-            // Blue to Green: 0 to 0.5
-            double t = norm * 2.0;  // 0 to 1
+        
+        // 4 color segments:
+        // 0.00-0.25: Black to Deep Blue
+        // 0.25-0.50: Deep Blue to Cyan/Green
+        // 0.50-0.75: Green to Yellow
+        // 0.75-1.00: Yellow to Red
+        
+        if (norm < 0.25) {
+            double t = norm * 4.0;
+            r = 0;
+            g = 0;
+            b = (uint8_t)(t * 255);
+        } else if (norm < 0.5) {
+            double t = (norm - 0.25) * 4.0;
             r = 0;
             g = (uint8_t)(t * 255);
-            b = (uint8_t)((1.0 - t) * 255);
-        } else {
-            // Green to Red: 0.5 to 1.0
-            double t = (norm - 0.5) * 2.0;  // 0 to 1
+            b = (uint8_t)((1.0 - t) * 255 + t * 150); // don't zero blue entirely too fast
+        } else if (norm < 0.75) {
+            double t = (norm - 0.5) * 4.0;
             r = (uint8_t)(t * 255);
-            g = (uint8_t)((1.0 - t) * 255);
+            g = 255;
+            b = (uint8_t)((1.0 - t) * 150); // fade out blue
+        } else {
+            double t = (norm - 0.75) * 4.0;
+            r = 255;
+            g = (uint8_t)((1.0 - t) * 255); // fade green to get pure red
             b = 0;
         }
     } else if (colorScale == 1) {
-        // Light Blue: black (0,0,0) -> light blue (135,206,250)
+        // Light Blue Waterfall: Black -> Dark Blue -> Standard Blue -> Cyan -> White
         double norm = intensityInt / 255.0;
-        r = (uint8_t)(norm * 135);
-        g = (uint8_t)(norm * 206);
-        b = (uint8_t)(norm * 250);
+        if (norm < 0.33) {
+            // Black to Dark Blue
+            double t = norm * 3.0; // 0 to 1
+            r = 0;
+            g = 0;
+            b = (uint8_t)(t * 150);
+        } else if (norm < 0.66) {
+            // Dark Blue to Cyan/Light Blue
+            double t = (norm - 0.33) * 3.0; // 0 to 1
+            r = 0;
+            g = (uint8_t)(t * 206);
+            b = (uint8_t)(150 + t * 105); // 150 -> 255
+        } else {
+            // Cyan/Light Blue to White (peak indicator)
+            double t = (norm - 0.66) * 3.0; // 0 to 1
+            r = (uint8_t)(t * 255);
+            g = (uint8_t)(206 + t * 49);  // 206 -> 255
+            b = 255;
+        }
     } else if (colorScale == 2) {
         // Grayscale: black -> white
         uint8_t gray = (uint8_t)intensityInt;
@@ -256,11 +351,34 @@ uint32_t getColor(double intensity) {
         g = gray;
         b = gray;
     } else {  // colorScale == 3
-        // Cool-Hot (Blue-Pink): blue (0,100,255) at low -> deep pink (255,20,147) at high
+        // Cool-Hot (SDR Plasma/Inferno style): Black -> Dark Purple -> Red -> Orange -> Yellow -> White
         double norm = intensityInt / 255.0;
-        r = (uint8_t)(norm * 255);
-        g = (uint8_t)((1.0 - norm) * 100 + norm * 20);
-        b = (uint8_t)((1.0 - norm) * 255 + norm * 147);
+        
+        if (norm < 0.25) {
+            // Black to Dark Purple
+            double t = norm * 4.0;
+            r = (uint8_t)(t * 100);
+            g = 0;
+            b = (uint8_t)(t * 150);
+        } else if (norm < 0.5) {
+            // Dark Purple to Red
+            double t = (norm - 0.25) * 4.0;
+            r = (uint8_t)(100 + t * 155);
+            g = 0;
+            b = (uint8_t)((1.0 - t) * 150);
+        } else if (norm < 0.75) {
+            // Red to Orange/Yellow
+            double t = (norm - 0.5) * 4.0;
+            r = 255;
+            g = (uint8_t)(t * 200);
+            b = 0;
+        } else {
+            // Yellow to White (highest peaks)
+            double t = (norm - 0.75) * 4.0;
+            r = 255;
+            g = (uint8_t)(200 + t * 55);
+            b = (uint8_t)(t * 255);
+        }
     }
     
     return 0xFF000000 | (b << 16) | (g << 8) | r;
@@ -491,7 +609,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                 int markerYTop = 0;
                 if (zoomEnabled) {
                     // Zoom mode: +8 kHz is the center of display
-                    markerX = surfaceWidth / 2.3;  // Center of screen = +8 kHz
+                    markerX = surfaceWidth / 2.325;  // Center of screen = +8 kHz
                 } else {
                     // Normal mode: ±24 kHz centered at DC, +8kHz is at 7/12 position  
                     markerX = (surfaceWidth * 7) / 11.05;
