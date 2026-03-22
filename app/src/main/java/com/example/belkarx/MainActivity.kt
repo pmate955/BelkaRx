@@ -2,6 +2,7 @@ package com.example.belkarx
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Context
 import android.graphics.PixelFormat
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
@@ -33,10 +34,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var recordingThread: Thread? = null
     private var surface: Surface? = null
     private lateinit var gestureDetector: GestureDetector
+    private lateinit var prefs: android.content.SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        // Initialize SharedPreferences
+        prefs = getSharedPreferences("BelkaRxSettings", Context.MODE_PRIVATE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         
@@ -81,6 +86,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.sensitivitySeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 setSensitivity(progress)
+                if (fromUser) saveSettings()
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -89,6 +95,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.contrastSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 setContrast(progress)
+                if (fromUser) saveSettings()
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -96,21 +103,27 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.swapIQCheckBox.setOnCheckedChangeListener { _, isChecked ->
             setSwapIQ(isChecked)
+            saveSettings()
             Log.d("BelkaRx", "Swap I/Q checkbox changed: $isChecked")
         }
 
         binding.zoomCheckBox.setOnCheckedChangeListener { _, isChecked ->
             setZoom(isChecked)
+            saveSettings()
             Log.d("BelkaRx", "Zoom checkbox changed: $isChecked")
         }
 
         binding.colorScaleSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
                 setColorScale(position)
+                saveSettings()
                 Log.d("BelkaRx", "Color scale selected: $position")
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+
+        // Load saved settings
+        loadSettings()
 
         setSensitivity(binding.sensitivitySeekBar.progress)
         setContrast(binding.contrastSeekBar.progress)
@@ -154,11 +167,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun setupColorScaleSpinner() {
-        val colorScales = arrayOf("Blue-Green-Red", "Black-Blue", "Grayscale")
+        val colorScales = arrayOf("Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot")
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, colorScales)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.colorScaleSpinner.adapter = adapter
-        binding.colorScaleSpinner.setSelection(0)  // Default to Blue-Green-Red (colored)
+        binding.colorScaleSpinner.setSelection(0)  // Default to Classic Rainbow
     }
 
     private fun checkPermission(): Boolean {
@@ -445,6 +458,45 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
 
+
+    override fun onPause() {
+        super.onPause()
+        saveSettings()
+    }
+
+    private fun saveSettings() {
+        val editor = prefs.edit()
+        editor.putInt("sensitivity", binding.sensitivitySeekBar.progress)
+        editor.putInt("contrast", binding.contrastSeekBar.progress)
+        editor.putBoolean("swapIQ", binding.swapIQCheckBox.isChecked)
+        editor.putBoolean("zoom", binding.zoomCheckBox.isChecked)
+        editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
+        editor.putInt("deviceSelection", binding.deviceSpinner.selectedItemPosition)
+        editor.apply()
+        Log.d("BelkaRx", "Settings saved")
+    }
+
+    private fun loadSettings() {
+        val sensitivity = prefs.getInt("sensitivity", 100)
+        val contrast = prefs.getInt("contrast", 100)
+        val swapIQ = prefs.getBoolean("swapIQ", false)
+        val zoom = prefs.getBoolean("zoom", false)
+        val colorScale = prefs.getInt("colorScale", 0)
+        val deviceSelection = prefs.getInt("deviceSelection", 0)
+        
+        binding.sensitivitySeekBar.progress = sensitivity
+        binding.contrastSeekBar.progress = contrast
+        binding.swapIQCheckBox.isChecked = swapIQ
+        binding.zoomCheckBox.isChecked = zoom
+        binding.colorScaleSpinner.setSelection(colorScale)
+        
+        // Set device selection if it's valid
+        if (deviceSelection >= 0 && deviceSelection < binding.deviceSpinner.count) {
+            binding.deviceSpinner.setSelection(deviceSelection)
+        }
+        
+        Log.d("BelkaRx", "Settings loaded: sensitivity=$sensitivity, contrast=$contrast, swapIQ=$swapIQ, zoom=$zoom, colorScale=$colorScale")
+    }
 
     private fun stopRecording() {
         isRecording.set(false)

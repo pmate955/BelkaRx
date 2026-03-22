@@ -100,8 +100,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
     std::lock_guard<std::mutex> lock(g_mutex);
     colorScale = scale;
-    const char* scaleNames[] = {"Blue-Green-Red", "Black-Blue", "Grayscale"};
-    if (scale >= 0 && scale < 3) {
+    const char* scaleNames[] = {"Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot"};
+    if (scale >= 0 && scale < 4) {
         LOGI("setColorScale: %d (%s)", scale, scaleNames[scale]);
     }
 }
@@ -188,16 +188,23 @@ uint32_t getColor(double intensity) {
             b = 0;
         }
     } else if (colorScale == 1) {
-        // Black-Blue: black (0,0,0) -> blue (0,0,255)
-        r = 0;
-        g = 0;
-        b = (uint8_t)intensityInt;
-    } else {  // colorScale == 2
+        // Light Blue: black (0,0,0) -> light blue (135,206,250)
+        double norm = intensityInt / 255.0;
+        r = (uint8_t)(norm * 135);
+        g = (uint8_t)(norm * 206);
+        b = (uint8_t)(norm * 250);
+    } else if (colorScale == 2) {
         // Grayscale: black -> white
         uint8_t gray = (uint8_t)intensityInt;
         r = gray;
         g = gray;
         b = gray;
+    } else {  // colorScale == 3
+        // Cool-Hot (Blue-Pink): blue (0,100,255) at low -> deep pink (255,20,147) at high
+        double norm = intensityInt / 255.0;
+        r = (uint8_t)(norm * 255);
+        g = (uint8_t)((1.0 - norm) * 100 + norm * 20);
+        b = (uint8_t)((1.0 - norm) * 255 + norm * 147);
     }
     
     return 0xFF000000 | (b << 16) | (g << 8) | r;
@@ -311,9 +318,10 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         startBin = -(visibleBins / 2);
     }
     
-    LOGI("Spectrum: %s, visibleBins=%d, startBin=%d, fftSize=%d, sampleRate=%d, displayBW=%.1f kHz", 
-         zoomEnabled ? "ZOOM +8kHz" : "normal ±24kHz", visibleBins, startBin, fftSize, currentSampleRate, 
-         (float)visibleBins * currentSampleRate / fftSize / 1000);
+    LOGI("Spectrum: %s, visibleBins=%d, startBin=%d, fftSize=%d, sampleRate=%d, displayBW=%.1f kHz, Hz/pixel=%.1f", 
+         zoomEnabled ? "ZOOM +8kHz (interpolated)" : "normal ±24kHz", visibleBins, startBin, fftSize, currentSampleRate, 
+         (float)visibleBins * currentSampleRate / fftSize / 1000,
+         (float)visibleBins * currentSampleRate / fftSize / surfaceWidth);
 
     // Draw new line
     double minMag = 1e9, maxMag = -1e9;
@@ -321,16 +329,45 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     // First pass: calculate min/max for current frame
     std::vector<double> lineMagnitudes(surfaceWidth);
     for (int x = 0; x < surfaceWidth; x++) {
-        int binIdxInSpan = (x * visibleBins) / surfaceWidth;
-        int binIdx = startBin + binIdxInSpan;
+        double mag;
         
-        // Wrap bin index to handle negative frequencies
-        int shiftedBin = binIdx;
-        if (shiftedBin < 0) shiftedBin += fftSize;
-        if (shiftedBin >= fftSize) shiftedBin -= fftSize;
+        if (zoomEnabled) {
+            // ZOOM MODE: use linear interpolation between bins for smoother resolution
+            double binPosReal = (x * (double)visibleBins) / surfaceWidth;
+            int bin1 = (int)binPosReal;
+            int bin2 = bin1 + 1;
+            double frac = binPosReal - bin1;  // 0.0 to 1.0 interpolation factor
+            
+            // Get bin indices with wrapping
+            int shiftedBin1 = startBin + bin1;
+            int shiftedBin2 = startBin + bin2;
+            
+            // Wrap negative bins
+            if (shiftedBin1 < 0) shiftedBin1 += fftSize;
+            if (shiftedBin1 >= fftSize) shiftedBin1 -= fftSize;
+            if (shiftedBin2 < 0) shiftedBin2 += fftSize;
+            if (shiftedBin2 >= fftSize) shiftedBin2 -= fftSize;
+            
+            // Calculate magnitudes for both bins
+            double mag1 = sqrt(real[shiftedBin1] * real[shiftedBin1] + imag[shiftedBin1] * imag[shiftedBin1]);
+            double mag2 = sqrt(real[shiftedBin2] * real[shiftedBin2] + imag[shiftedBin2] * imag[shiftedBin2]);
+            
+            // Linear interpolation
+            mag = mag1 * (1.0 - frac) + mag2 * frac;
+        } else {
+            // NORMAL MODE: direct bin lookup (as before)
+            int binIdxInSpan = (x * visibleBins) / surfaceWidth;
+            int binIdx = startBin + binIdxInSpan;
+            
+            // Wrap bin index to handle negative frequencies
+            int shiftedBin = binIdx;
+            if (shiftedBin < 0) shiftedBin += fftSize;
+            if (shiftedBin >= fftSize) shiftedBin -= fftSize;
 
-        // I/Q magnitude: sqrt(I^2 + Q^2)
-        double mag = sqrt(real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin]);
+            // I/Q magnitude: sqrt(I^2 + Q^2)
+            mag = sqrt(real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin]);
+        }
+        
         double logMag = 20 * log10(mag + 1e-6) + 120;
         
         lineMagnitudes[x] = logMag;
