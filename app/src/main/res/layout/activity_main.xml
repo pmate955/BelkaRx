@@ -7,15 +7,27 @@
     android:paddingTop="16dp"
     tools:context=".MainActivity">
 
+    <Button
+        android:id="@+id/toggleControlsButton"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="24dp"
+        android:text="▲"
+        android:textSize="14sp"
+        android:padding="0dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
     <Spinner
         android:id="@+id/deviceSpinner"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
+        android:layout_marginStart="8dp"
         android:layout_marginTop="32dp"
         android:layout_marginEnd="8dp"
         app:layout_constraintEnd_toStartOf="@+id/startStopButton"
-        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintStart_toEndOf="@+id/toggleControlsButton"
         app:layout_constraintTop_toTopOf="parent" />
 
     <Button
@@ -28,96 +40,97 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:id="@+id/controlsContainer"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
+        android:orientation="vertical"
         android:layout_marginTop="12dp"
-        android:text="Status: Idle"
-        android:textSize="12sp"
-        android:textColor="@android:color/holo_blue_dark"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/deviceSpinner" />
-
-    <TextView
-        android:id="@+id/sensitivityLabel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="16dp"
-        android:text="Sensitivity"
-        android:textColor="@android:color/white"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/statusText" />
-
-    <SeekBar
-        android:id="@+id/sensitivitySeekBar"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="16dp"
-        android:max="200"
-        android:progress="100"
-        app:layout_constraintBottom_toBottomOf="@+id/sensitivityLabel"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@+id/sensitivityLabel"
-        app:layout_constraintTop_toTopOf="@+id/sensitivityLabel" />
+        app:layout_constraintTop_toBottomOf="@+id/toggleControlsButton">
 
-    <CheckBox
-        android:id="@+id/swapIQCheckBox"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="8dp"
-        android:checked="false"
-        android:text="Swap I/Q"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/sensitivityLabel" />
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="0dp"
+            android:text="Status: Idle"
+            android:textSize="12sp"
+            android:textColor="@android:color/holo_blue_dark" />
 
-    <CheckBox
-        android:id="@+id/zoomCheckBox"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:checked="false"
-        android:text="Zoom (±12kHz)"
-        app:layout_constraintStart_toEndOf="@+id/swapIQCheckBox"
-        app:layout_constraintTop_toTopOf="@+id/swapIQCheckBox" />
+        <TextView
+            android:id="@+id/sensitivityLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="4dp"
+            android:text="Sensitivity"
+            android:textColor="@android:color/white" />
 
-    <Spinner
-        android:id="@+id/colorScaleSpinner"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:layout_marginEnd="16dp"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@+id/zoomCheckBox"
-        app:layout_constraintTop_toTopOf="@+id/swapIQCheckBox"
-        app:layout_constraintBottom_toBottomOf="@+id/swapIQCheckBox" />
+        <SeekBar
+            android:id="@+id/sensitivitySeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:layout_marginStart="16dp"
+            android:max="200"
+            android:progress="100" />
 
-    <TextView
-        android:id="@+id/contrastLabel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="8dp"
-        android:text="Contrast"
-        android:textColor="@android:color/white"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/colorScaleSpinner" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp">
 
-    <SeekBar
-        android:id="@+id/contrastSeekBar"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginEnd="16dp"
-        android:layout_marginTop="8dp"
-        android:max="300"
-        android:progress="100"
-        app:layout_constraintBottom_toBottomOf="@+id/contrastLabel"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@+id/contrastLabel"
-        app:layout_constraintTop_toTopOf="@+id/contrastLabel" />
+            <CheckBox
+                android:id="@+id/swapIQCheckBox"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="false"
+                android:text="Swap I/Q" />
+
+            <CheckBox
+                android:id="@+id/zoomCheckBox"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:checked="false"
+                android:text="Zoom (±12kHz)" />
+
+            <Spinner
+                android:id="@+id/colorScaleSpinner"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1" />
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/contrastLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="4dp"
+            android:text="Contrast"
+            android:textColor="@android:color/white" />
+
+        <SeekBar
+            android:id="@+id/contrastSeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="16dp"
+            android:layout_marginStart="16dp"
+            android:max="300"
+            android:progress="100" />
+
+    </LinearLayout>
 
     <SurfaceView
         android:id="@+id/waterfallSurface"
@@ -127,6 +140,6 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/contrastSeekBar" />
+        app:layout_constraintTop_toBottomOf="@+id/controlsContainer" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

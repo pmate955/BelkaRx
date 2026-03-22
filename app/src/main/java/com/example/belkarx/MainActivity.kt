@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
+import android.view.View
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.SeekBar
@@ -42,6 +43,17 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.waterfallSurface.holder.addCallback(this)
         setupDeviceSpinner()
         setupColorScaleSpinner()
+
+        binding.toggleControlsButton.setOnClickListener {
+            val controlsContainer = binding.controlsContainer
+            if (controlsContainer.visibility == View.VISIBLE) {
+                controlsContainer.visibility = View.GONE
+                binding.toggleControlsButton.text = "▼"
+            } else {
+                controlsContainer.visibility = View.VISIBLE
+                binding.toggleControlsButton.text = "▲"
+            }
+        }
 
         binding.startStopButton.setOnClickListener {
             if (isRecording.get()) {
