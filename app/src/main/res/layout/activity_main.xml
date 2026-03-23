@@ -91,8 +91,17 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:checked="false"
-                android:textOff="Zoom (±12kHz)"
-                android:textOn="Zoom (±12kHz)" />
+                android:textOff="Zoom"
+                android:textOn="Zoom" />
+
+            <ToggleButton
+                android:id="@+id/showSpectrumToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:checked="false"
+                android:textOff="Spectrum"
+                android:textOn="Spectrum" />
 
             <ToggleButton
                 android:id="@+id/fastWaterfallToggle"

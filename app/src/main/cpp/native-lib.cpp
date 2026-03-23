@@ -17,12 +17,14 @@ std::mutex g_mutex;
 int surfaceWidth = 0;
 int surfaceHeight = 0;
 std::vector<uint32_t> waterfallBuffer;
+std::vector<double> spectrumDecayBuffer;
 int sensitivityValue = 100;
 int contrastValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
 bool zoomEnabled = false;
 bool fastWaterfallEnabled = false;
+bool showSpectrumEnabled = false;
 int colorScale = 0;  // 0: Grayscale, 1: Black-Blue, 2: Blue-Green-Red
 
 // Spectrum gain smoothing
@@ -102,6 +104,13 @@ Java_com_example_belkarx_MainActivity_setFastWaterfall(JNIEnv* env, jobject /* t
     std::lock_guard<std::mutex> lock(g_mutex);
     fastWaterfallEnabled = (enabled == JNI_TRUE);
     LOGI("setFastWaterfall: %s", fastWaterfallEnabled ? "true" : "false");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setShowSpectrum(JNIEnv* env, jobject /* this */, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    showSpectrumEnabled = (enabled == JNI_TRUE);
+    LOGI("setShowSpectrum: %s", showSpectrumEnabled ? "true" : "false");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -559,8 +568,8 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         if (logMag > maxMag) maxMag = logMag;
     }
     
-    // Smooth the min/max with exponential filter (time constant ~0.5 seconds at 24fps)
-    double alpha = 0.4;  // Smoothing factor: lower = slower changes
+    // Process min/max smoothing based on display type
+    double alpha = showSpectrumEnabled ? 1.0 : 0.4;  // Smoothing factor: 1.0 = instant for spectrum, 0.4 = smooth for waterfall
     smoothedMinMag = smoothedMinMag * (1.0 - alpha) + minMag * alpha;
     smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
     
@@ -598,9 +607,82 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
             if (buffer_out.width >= surfaceWidth && buffer_out.height >= surfaceHeight) {
                 auto* dest = static_cast<uint32_t*>(buffer_out.bits);
                 
-                // Draw spectrum data
-                for (int y = 0; y < surfaceHeight; y++) {
-                    memcpy(&dest[y * buffer_out.stride], &waterfallBuffer[y * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+                if (showSpectrumEnabled) {
+                    if (spectrumDecayBuffer.size() != (size_t)surfaceWidth) {
+                        spectrumDecayBuffer.assign(surfaceWidth, -1000.0);
+                    }
+                    // Clear background to black
+                    for (int y = 0; y < surfaceHeight; y++) {
+                        for (int x = 0; x < surfaceWidth; x++) {
+                            dest[y * buffer_out.stride + x] = 0xFF000000;
+                        }
+                    }
+                    // Draw spectrum chart
+                    int prevY = -1;
+                    
+                    // Manual Offset and Range based on sliders for Spectrum Mode
+                    // Sensitivity (0-200) -> Reference level (top of display). Invert logic so higher sensitivity = lower refLevel (zooms into noise floor).
+                    double refLevel = 250.0 - sensitivityValue; 
+                    // Contrast (0-300) -> Range (display height, e.g., high contrast = 20 dB, low contrast = 160 dB)
+                    double displayRange = 160.0 - (contrastValue / 300.0) * 140.0;
+                    double minLevel = refLevel - displayRange;
+                    
+                    for (int x = 0; x < surfaceWidth; x++) {
+                        double logMag = lineMagnitudes[x];
+                        
+                        // Apply decay
+                        if (logMag > spectrumDecayBuffer[x]) {
+                            spectrumDecayBuffer[x] = logMag;
+                        } else {
+                            // Decay rate depends on "Fast" toggle
+                            double decayRate = fastWaterfallEnabled ? 1.5 : 0.75;
+                            spectrumDecayBuffer[x] -= decayRate;
+                        }
+                        double dispMag = spectrumDecayBuffer[x];
+                        
+                        double normalized = (dispMag - minLevel) / displayRange;
+                        normalized = fmax(0.0, fmin(1.0, normalized));
+                        
+                        // Pick color based on the same color scale logic as the waterfall,
+                        // but floor the normalized value for color at e.g. 0.2 (~50 out of 255) 
+                        // so that deeply dipped signals don't turn completely black and disappear 
+                        // against the black background.
+                        double colorNormalized = fmax(0.2, normalized);
+                        uint32_t traceColor;
+                        if (colorScale == 1) { // Light Blue -> Solid Light Blue trace
+                            // native window format is usually ABGR or ARGB depending on device. 
+                            // With getColor, we use 0xFF000000 | (b << 16) | (g << 8) | r.
+                            // Light Blue: R=0x00, G=0xBF, B=0xFF -> 0xFF000000 | (0xFF<<16) | (0xBF<<8) | 0x00
+                            traceColor = 0xFFFFBF00; 
+                        } else if (colorScale == 2) { // Grayscale -> Solid White trace
+                            traceColor = 0xFFFFFFFF; // White
+                        } else {
+                            traceColor = getColor(colorNormalized * 255.0);
+                        }
+                        
+                        int plotHeight = surfaceHeight - TOP_MARGIN;
+                        int yPos = surfaceHeight - 1 - (int)(normalized * plotHeight);
+                        yPos = std::max(TOP_MARGIN, std::min(surfaceHeight - 1, yPos));
+                        
+                        if (prevY != -1) {
+                            // Draw continuous line between prevY and yPos
+                            int step = (yPos > prevY) ? 1 : -1;
+                            int y = prevY;
+                            while (true) {
+                                dest[y * buffer_out.stride + x] = traceColor;
+                                if (y == yPos) break;
+                                y += step;
+                            }
+                        } else {
+                            dest[yPos * buffer_out.stride + x] = traceColor;
+                        }
+                        prevY = yPos;
+                    }
+                } else {
+                    // Draw waterfall data
+                    for (int y = 0; y < surfaceHeight; y++) {
+                        memcpy(&dest[y * buffer_out.stride], &waterfallBuffer[y * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+                    }
                 }
                 
                 // Draw +8kHz marker arrow above the spectrum

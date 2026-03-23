@@ -125,6 +125,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Fast waterfall checkbox changed: $isChecked")
         }
 
+        binding.showSpectrumToggle.setOnCheckedChangeListener { _, isChecked ->
+            setShowSpectrum(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "Show spectrum checkbox changed: $isChecked")
+        }
+
         binding.colorScaleSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
                 setColorScale(position)
@@ -142,6 +148,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setSwapIQ(binding.swapIQToggle.isChecked)
         setZoom(binding.zoomToggle.isChecked)
         setFastWaterfall(binding.fastWaterfallToggle.isChecked)
+        setShowSpectrum(binding.showSpectrumToggle.isChecked)
         setColorScale(binding.colorScaleSpinner.selectedItemPosition)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQToggle.isChecked}")
 
@@ -547,6 +554,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("swapIQ", binding.swapIQToggle.isChecked)
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("fastWaterfall", binding.fastWaterfallToggle.isChecked)
+        editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
         editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
         editor.putInt("deviceSelection", binding.deviceSpinner.selectedItemPosition)
         editor.apply()
@@ -559,6 +567,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val swapIQ = prefs.getBoolean("swapIQ", false)
         val zoom = prefs.getBoolean("zoom", false)
         val fastWaterfall = prefs.getBoolean("fastWaterfall", false)
+        val showSpectrum = prefs.getBoolean("showSpectrum", false)
         val colorScale = prefs.getInt("colorScale", 0)
         val deviceSelection = prefs.getInt("deviceSelection", 0)
         
@@ -567,6 +576,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.swapIQToggle.isChecked = swapIQ
         binding.zoomToggle.isChecked = zoom
         binding.fastWaterfallToggle.isChecked = fastWaterfall
+        binding.showSpectrumToggle.isChecked = showSpectrum
         binding.colorScaleSpinner.setSelection(colorScale)
         
         // Set device selection if it's valid
@@ -623,6 +633,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setSwapIQ(swap: Boolean)
     private external fun setZoom(enabled: Boolean)
     private external fun setFastWaterfall(enabled: Boolean)
+    private external fun setShowSpectrum(enabled: Boolean)
     private external fun setColorScale(scale: Int)
 
     // Oboe native methods
