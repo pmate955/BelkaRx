@@ -67,13 +67,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setupColorScaleSpinner()
 
         binding.toggleControlsButton.setOnClickListener {
+            binding.toggleControlsButton.isChecked = false // Soha ne maradjon benyomva
             val controlsContainer = binding.controlsContainer
             if (controlsContainer.visibility == View.VISIBLE) {
                 controlsContainer.visibility = View.GONE
-                binding.toggleControlsButton.text = "▼"
+                binding.toggleControlsButton.textOn = "▼"
+                binding.toggleControlsButton.textOff = "▼"
+                binding.toggleControlsButton.isChecked = false // Update UI refresh
             } else {
                 controlsContainer.visibility = View.VISIBLE
-                binding.toggleControlsButton.text = "▲"
+                binding.toggleControlsButton.textOn = "▲"
+                binding.toggleControlsButton.textOff = "▲"
+                binding.toggleControlsButton.isChecked = false // Update UI refresh
             }
         }
 
@@ -183,7 +188,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val dropdownContainer = binding.dropdownDynamicArea
         
         // Remove views from their current parents safely
-        val viewsToMove = listOf(binding.colorScaleSpinner, binding.sensitivityView, binding.contrastView)
+        val viewsToMove = listOf(binding.spinnerContainer, binding.sensitivityView, binding.contrastView)
         for (v in viewsToMove) {
             (v.parent as? ViewGroup)?.removeView(v)
         }
@@ -204,16 +209,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             topContainer.addView(binding.sensitivityView)
             topContainer.addView(binding.contrastView)
             
-            binding.colorScaleSpinner.layoutParams = getDropParams()
-            dropdownContainer.addView(binding.colorScaleSpinner)
+            binding.spinnerContainer.layoutParams = getDropParams()
+            dropdownContainer.addView(binding.spinnerContainer)
         } else {
             // In Portrait: Sensitivity on top, Color Scale & Contrast in dropdown
             binding.sensitivityView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
             
-            binding.colorScaleSpinner.layoutParams = getDropParams()
+            binding.spinnerContainer.layoutParams = getDropParams()
             binding.contrastView.layoutParams = getDropParams()
-            dropdownContainer.addView(binding.colorScaleSpinner)
+            dropdownContainer.addView(binding.spinnerContainer)
             dropdownContainer.addView(binding.contrastView)
         }
     }
@@ -373,7 +378,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             audioRecord?.startRecording()
             
             isRecording.set(true)
-            binding.startStopButton.text = "Stop"
+            binding.startStopButton.isChecked = true
 
             // Wait a bit for surface to be initialized
             var surfaceReady = false
@@ -597,7 +602,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         audioRecord?.release()
         audioRecord = null
         // stopService(Intent(this, SdrService::class.java))
-        binding.startStopButton.text = "Start"
+        binding.startStopButton.isChecked = false
         binding.statusText.text = "Status: Idle"
     }
 

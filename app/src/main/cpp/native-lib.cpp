@@ -412,8 +412,13 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         return;
     }
 
-    std::vector<double> real(fftSize);
-    std::vector<double> imag(fftSize);
+    // Use thread_local to avoid memory allocation on every frame
+    thread_local std::vector<double> real;
+    thread_local std::vector<double> imag;
+    if (real.size() != fftSize) {
+        real.resize(fftSize);
+        imag.resize(fftSize);
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -480,15 +485,17 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     int TOP_MARGIN = 15;
     int shiftRows = fastWaterfallEnabled ? 2 : 1;
 
-    // Shift waterfall down
-    for (int y = surfaceHeight - 1; y >= TOP_MARGIN + shiftRows; y--) {
-        memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - shiftRows) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
-    }
-    
-    // Clear top margin to black (fully opaque)
-    for (int y = 0; y < TOP_MARGIN; y++) {
-        for (int x = 0; x < surfaceWidth; x++) {
-            waterfallBuffer[y * surfaceWidth + x] = 0xFF000000;
+    if (!showSpectrumEnabled) {
+        // Shift waterfall down
+        for (int y = surfaceHeight - 1; y >= TOP_MARGIN + shiftRows; y--) {
+            memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - shiftRows) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+        }
+        
+        // Clear top margin to black (fully opaque)
+        for (int y = 0; y < TOP_MARGIN; y++) {
+            for (int x = 0; x < surfaceWidth; x++) {
+                waterfallBuffer[y * surfaceWidth + x] = 0xFF000000;
+            }
         }
     }
 
@@ -520,16 +527,25 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     double minMag = 1e9, maxMag = -1e9;
     
     // First pass: calculate min/max for current frame
-    std::vector<double> lineMagnitudes(surfaceWidth);
+    // Use thread_local to avoid memory allocation every frame
+    thread_local std::vector<double> lineMagnitudes;
+    if (lineMagnitudes.size() != surfaceWidth) {
+        lineMagnitudes.resize(surfaceWidth);
+    }
+    
+    // Scale precalculations to avoid excessive divisions inside loop
+    double invSurfaceWidth = 1.0 / surfaceWidth;
+    
     for (int x = 0; x < surfaceWidth; x++) {
-        double mag;
+        double logMag;
         
         if (zoomEnabled) {
-            // ZOOM MODE: use linear interpolation between bins for smoother resolution
-            double binPosReal = (x * (double)visibleBins) / surfaceWidth;
+            // ZOOM MODE: use linear interpolation
+            double binPosReal = (x * (double)visibleBins) * invSurfaceWidth;
             int bin1 = (int)binPosReal;
             int bin2 = bin1 + 1;
             double frac = binPosReal - bin1;  // 0.0 to 1.0 interpolation factor
+            double invFrac = 1.0 - frac;
             
             // Get bin indices with wrapping
             int shiftedBin1 = startBin + bin1;
@@ -537,31 +553,30 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
             
             // Wrap negative bins
             if (shiftedBin1 < 0) shiftedBin1 += fftSize;
-            if (shiftedBin1 >= fftSize) shiftedBin1 -= fftSize;
+            else if (shiftedBin1 >= fftSize) shiftedBin1 -= fftSize;
             if (shiftedBin2 < 0) shiftedBin2 += fftSize;
-            if (shiftedBin2 >= fftSize) shiftedBin2 -= fftSize;
+            else if (shiftedBin2 >= fftSize) shiftedBin2 -= fftSize;
             
-            // Calculate magnitudes for both bins
-            double mag1 = sqrt(real[shiftedBin1] * real[shiftedBin1] + imag[shiftedBin1] * imag[shiftedBin1]);
-            double mag2 = sqrt(real[shiftedBin2] * real[shiftedBin2] + imag[shiftedBin2] * imag[shiftedBin2]);
+            // Calculate squared magnitudes to avoid sqrt
+            double magSq1 = real[shiftedBin1] * real[shiftedBin1] + imag[shiftedBin1] * imag[shiftedBin1];
+            double magSq2 = real[shiftedBin2] * real[shiftedBin2] + imag[shiftedBin2] * imag[shiftedBin2];
             
-            // Linear interpolation
-            mag = mag1 * (1.0 - frac) + mag2 * frac;
+            // Linear interpolation of squared magnitude
+            double interpMagSq = magSq1 * invFrac + magSq2 * frac;
+            logMag = 10.0 * log10(interpMagSq + 1e-12) + 120.0;
         } else {
             // NORMAL MODE: direct bin lookup (as before)
-            int binIdxInSpan = (x * visibleBins) / surfaceWidth;
+            int binIdxInSpan = (x * visibleBins) * invSurfaceWidth;
             int binIdx = startBin + binIdxInSpan;
             
             // Wrap bin index to handle negative frequencies
-            int shiftedBin = binIdx;
-            if (shiftedBin < 0) shiftedBin += fftSize;
+            int shiftedBin = binIdx >= 0 ? binIdx : binIdx + fftSize;
             if (shiftedBin >= fftSize) shiftedBin -= fftSize;
 
-            // I/Q magnitude: sqrt(I^2 + Q^2)
-            mag = sqrt(real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin]);
+            // I/Q squared magnitude: I^2 + Q^2
+            double magSq = real[shiftedBin] * real[shiftedBin] + imag[shiftedBin] * imag[shiftedBin];
+            logMag = 10.0 * log10(magSq + 1e-12) + 120.0;
         }
-        
-        double logMag = 20 * log10(mag + 1e-6) + 120;
         
         lineMagnitudes[x] = logMag;
         if (logMag < minMag) minMag = logMag;
@@ -574,17 +589,26 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
     
     // Second pass: draw with normalized intensity using smoothed min/max
-    for (int x = 0; x < surfaceWidth; x++) {
-        double logMag = lineMagnitudes[x];
-        
-        // Normalize intensity to 0-255 based on smoothed min/max
+    if (!showSpectrumEnabled) {
         double range = smoothedMaxMag - smoothedMinMag + 1e-6;  // Avoid division by zero
-        double normalizedIntensity = (logMag - smoothedMinMag) / range * 255.0;
-        normalizedIntensity = fmax(0.0, fmin(255.0, normalizedIntensity));
+        double invRange = 255.0 / range;
         
-        uint32_t color = getColor(normalizedIntensity);
-        for (int r = 0; r < shiftRows; r++) {
-            waterfallBuffer[(TOP_MARGIN + r) * surfaceWidth + x] = color;
+        // Fill the first new row sequentially
+        uint32_t* firstRowBuffer = &waterfallBuffer[TOP_MARGIN * surfaceWidth];
+        for (int x = 0; x < surfaceWidth; x++) {
+            double logMag = lineMagnitudes[x];
+            
+            // Normalize intensity to 0-255 based on smoothed min/max
+            double normalizedIntensity = (logMag - smoothedMinMag) * invRange;
+            // Fast clamp
+            normalizedIntensity = normalizedIntensity < 0.0 ? 0.0 : (normalizedIntensity > 255.0 ? 255.0 : normalizedIntensity);
+            
+            firstRowBuffer[x] = getColor(normalizedIntensity);
+        }
+        
+        // Copy the first row if shiftRows > 1
+        for (int r = 1; r < shiftRows; r++) {
+            memcpy(&waterfallBuffer[(TOP_MARGIN + r) * surfaceWidth], firstRowBuffer, surfaceWidth * sizeof(uint32_t));
         }
     }
     static int drawCount = 0;
@@ -611,10 +635,14 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                     if (spectrumDecayBuffer.size() != (size_t)surfaceWidth) {
                         spectrumDecayBuffer.assign(surfaceWidth, -1000.0);
                     }
-                    // Clear background to black
-                    for (int y = 0; y < surfaceHeight; y++) {
-                        for (int x = 0; x < surfaceWidth; x++) {
-                            dest[y * buffer_out.stride + x] = 0xFF000000;
+                    // Clear background to black (Optimized 32-bit SIMD fill)
+                    if (buffer_out.stride == surfaceWidth) {
+                        // Contiguous memory: blast it all at once
+                        std::fill_n(dest, surfaceWidth * surfaceHeight, 0xFF000000);
+                    } else {
+                        // Memory has padding: fill row by row using optimized blocks
+                        for (int y = 0; y < surfaceHeight; y++) {
+                            std::fill_n(&dest[y * buffer_out.stride], surfaceWidth, 0xFF000000);
                         }
                     }
                     // Draw spectrum chart
@@ -626,6 +654,10 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                     // Contrast (0-300) -> Range (display height, e.g., high contrast = 20 dB, low contrast = 160 dB)
                     double displayRange = 160.0 - (contrastValue / 300.0) * 140.0;
                     double minLevel = refLevel - displayRange;
+                    double invDisplayRange = 1.0 / displayRange; // Pre-calc for optimization
+                    
+                    double decayRate = fastWaterfallEnabled ? 1.5 : 0.75;
+                    int plotHeight = surfaceHeight - TOP_MARGIN;
                     
                     for (int x = 0; x < surfaceWidth; x++) {
                         double logMag = lineMagnitudes[x];
@@ -634,25 +666,19 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                         if (logMag > spectrumDecayBuffer[x]) {
                             spectrumDecayBuffer[x] = logMag;
                         } else {
-                            // Decay rate depends on "Fast" toggle
-                            double decayRate = fastWaterfallEnabled ? 1.5 : 0.75;
                             spectrumDecayBuffer[x] -= decayRate;
                         }
-                        double dispMag = spectrumDecayBuffer[x];
                         
-                        double normalized = (dispMag - minLevel) / displayRange;
-                        normalized = fmax(0.0, fmin(1.0, normalized));
+                        double normalized = (spectrumDecayBuffer[x] - minLevel) * invDisplayRange;
+                        normalized = normalized < 0.0 ? 0.0 : (normalized > 1.0 ? 1.0 : normalized); // Fast clamp
                         
                         // Pick color based on the same color scale logic as the waterfall,
                         // but floor the normalized value for color at e.g. 0.2 (~50 out of 255) 
                         // so that deeply dipped signals don't turn completely black and disappear 
                         // against the black background.
-                        double colorNormalized = fmax(0.2, normalized);
+                        double colorNormalized = normalized < 0.2 ? 0.2 : normalized;
                         uint32_t traceColor;
                         if (colorScale == 1) { // Light Blue -> Solid Light Blue trace
-                            // native window format is usually ABGR or ARGB depending on device. 
-                            // With getColor, we use 0xFF000000 | (b << 16) | (g << 8) | r.
-                            // Light Blue: R=0x00, G=0xBF, B=0xFF -> 0xFF000000 | (0xFF<<16) | (0xBF<<8) | 0x00
                             traceColor = 0xFFFFBF00; 
                         } else if (colorScale == 2) { // Grayscale -> Solid White trace
                             traceColor = 0xFFFFFFFF; // White
@@ -660,19 +686,18 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                             traceColor = getColor(colorNormalized * 255.0);
                         }
                         
-                        int plotHeight = surfaceHeight - TOP_MARGIN;
                         int yPos = surfaceHeight - 1 - (int)(normalized * plotHeight);
-                        yPos = std::max(TOP_MARGIN, std::min(surfaceHeight - 1, yPos));
+                        yPos = yPos < TOP_MARGIN ? TOP_MARGIN : (yPos >= surfaceHeight ? surfaceHeight - 1 : yPos);
                         
                         if (prevY != -1) {
                             // Draw continuous line between prevY and yPos
                             int step = (yPos > prevY) ? 1 : -1;
                             int y = prevY;
-                            while (true) {
+                            while (y != yPos) {
                                 dest[y * buffer_out.stride + x] = traceColor;
-                                if (y == yPos) break;
                                 y += step;
                             }
+                            dest[yPos * buffer_out.stride + x] = traceColor;
                         } else {
                             dest[yPos * buffer_out.stride + x] = traceColor;
                         }
