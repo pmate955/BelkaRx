@@ -136,140 +136,142 @@ Java_com_example_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */,
     LOGI("setSwapIQ: %d", (int)swap);
 }
 
-void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int markerPixelY) {
-    // Draw a yellow downward pointing arrow marker above the spectrum
-    if (markerPixelX < 0 || markerPixelX >= surfaceWidth) return;
-    
-    const uint32_t YELLOW = 0xFF00FFFF;  // ARGB format: yellow
+static void drawArrowHead(uint32_t* dest, int stride, int centerX, int topY) {
+    const uint32_t YELLOW = 0xFF00FFFF;
     const int ARROW_SIZE = 15;
-    
-    // Simple 3x5 font for numbers 0-9, and '+', '-'
+    for (int i = 0; i <= ARROW_SIZE; i++) {
+        int y = topY + i;
+        if (y < surfaceHeight) {
+            int width = ARROW_SIZE - i;
+            for (int x = centerX - width; x <= centerX + width; x++) {
+                if (x >= 0 && x < surfaceWidth) dest[y * stride + x] = YELLOW;
+            }
+        }
+    }
+}
+
+static void drawFrequencyGridLines(uint32_t* dest, int stride, int markerX, int markerY, float Hz_per_pixel) {
+    const uint32_t YELLOW = 0xFF00FFFF;
     const uint8_t font[12][5] = {
-        {0x7, 0x5, 0x5, 0x5, 0x7}, // 0
-        {0x2, 0x6, 0x2, 0x2, 0x7}, // 1
-        {0x7, 0x1, 0x7, 0x4, 0x7}, // 2
-        {0x7, 0x1, 0x7, 0x1, 0x7}, // 3
-        {0x5, 0x5, 0x7, 0x1, 0x1}, // 4
-        {0x7, 0x4, 0x7, 0x1, 0x7}, // 5
-        {0x7, 0x4, 0x7, 0x5, 0x7}, // 6
-        {0x7, 0x1, 0x2, 0x2, 0x2}, // 7
-        {0x7, 0x5, 0x7, 0x5, 0x7}, // 8
-        {0x7, 0x5, 0x7, 0x1, 0x7}, // 9
-        {0x0, 0x2, 0x7, 0x2, 0x0}, // 10: +
-        {0x0, 0x0, 0x7, 0x0, 0x0}  // 11: -
+        {0x7, 0x5, 0x5, 0x5, 0x7}, {0x2, 0x6, 0x2, 0x2, 0x7}, {0x7, 0x1, 0x7, 0x4, 0x7},
+        {0x7, 0x1, 0x7, 0x1, 0x7}, {0x5, 0x5, 0x7, 0x1, 0x1}, {0x7, 0x4, 0x7, 0x1, 0x7},
+        {0x7, 0x4, 0x7, 0x5, 0x7}, {0x7, 0x1, 0x2, 0x2, 0x2}, {0x7, 0x5, 0x7, 0x5, 0x7},
+        {0x7, 0x5, 0x7, 0x1, 0x7}, {0x0, 0x2, 0x7, 0x2, 0x0}, {0x0, 0x0, 0x7, 0x0, 0x0}
     };
 
     auto drawNum = [&](int x, int y, int num) {
-        int scale = 3; // scale font by 3x for readability
-        int cx = x;
+        int scale = 3, cx = x;
         auto drawChar = [&](int charIdx) {
             for (int r = 0; r < 5; ++r) {
                 for (int c = 0; c < 3; ++c) {
                     if ((font[charIdx][r] >> (2 - c)) & 1) {
                         for (int sy = 0; sy < scale; ++sy) {
                             for (int sx = 0; sx < scale; ++sx) {
-                                int px = cx + c * scale + sx;
-                                int py = y + r * scale + sy;
-                                if (px >= 0 && px < surfaceWidth && py >= 0 && py < surfaceHeight) {
+                                int px = cx + c * scale + sx, py = y + r * scale + sy;
+                                if (px >= 0 && px < surfaceWidth && py >= 0 && py < surfaceHeight)
                                     dest[py * stride + px] = YELLOW;
-                                }
                             }
                         }
                     }
                 }
             }
-            cx += 4 * scale; 
+            cx += 4 * scale;
         };
-        
         int numChars = 2;
         if (std::abs(num) >= 10) numChars = 3;
         if (std::abs(num) >= 100) numChars = 4;
-        
-        cx -= ((numChars * 4 - 1) * scale) / 2; // Center text at x
-
+        cx -= ((numChars * 4 - 1) * scale) / 2;
         if (num > 0) drawChar(10);
         else if (num < 0) { drawChar(11); num = -num; }
-        
         if (num >= 100) {
-            drawChar(num / 100);
-            drawChar((num / 10) % 10);
-            drawChar(num % 10);
+            drawChar(num / 100); drawChar((num / 10) % 10); drawChar(num % 10);
         } else if (num >= 10) {
-            drawChar(num / 10);
-            drawChar(num % 10);
+            drawChar(num / 10); drawChar(num % 10);
         } else {
             drawChar(num % 10);
         }
     };
 
-    // Draw downward pointing arrow head (triangle with tip at bottom)
-    for (int i = 0; i <= ARROW_SIZE; i++) {
-        int y = markerPixelY + i;
-        if (y < surfaceHeight) {
-            int width = ARROW_SIZE - i;  // Wider at top, narrower at bottom (tip)
-            for (int x = markerPixelX - width; x <= markerPixelX + width; x++) {
-                if (x >= 0 && x < surfaceWidth) {
-                    dest[y * stride + x] = YELLOW;
-                }
-            }
-        }
-    }
-    
-    // Draw frequency grid lines relative to the marker position (reference point)
-    // Grid lines at 5 kHz intervals, longer at 10 kHz multiples
-    const int FFT_SIZE = 2048;
-    const int BASE_BINS = FFT_SIZE / 4;  // 512 bins
-    const float HZ_PER_BIN = (float)currentSampleRate / FFT_SIZE;  // Hz per FFT bin (~46.875 Hz at 96kHz)
-    
-    int visibleBins, startBin;
-    float Hz_per_pixel;
-    
-    if (zoomEnabled) {
-        // Zoom mode: ±6 kHz centered at +8 kHz (+2 to +14 kHz displayed)
-        visibleBins = BASE_BINS / 2;  // 256 bins = 12 kHz bandwidth
-        int binFreqResolution = currentSampleRate / FFT_SIZE;
-        int targetBin = (8000 / binFreqResolution);  // +8 kHz bin position
-        startBin = targetBin - (visibleBins / 2);  // Center at +8 kHz
-    } else {
-        // Normal mode: ±12 kHz centered at DC (-12 to +12 kHz displayed)
-        visibleBins = BASE_BINS;  // 512 bins = 24 kHz bandwidth
-        startBin = -(visibleBins / 2);  // -12 kHz at the left edge
-    }
-    
-    // Calculate Hz per pixel for scaling
-    Hz_per_pixel = static_cast<float>(visibleBins) * HZ_PER_BIN / static_cast<float>(surfaceWidth);
-    
-    // Draw grid lines at 5 kHz intervals relative to marker position
     for (int offsetKHz = -50; offsetKHz <= 50; offsetKHz += 5) {
-        // Calculate pixel offset from marker position
         float pixelOffset = (static_cast<float>(offsetKHz) * 1000.0f) / Hz_per_pixel;
-        int pixelX = markerPixelX + static_cast<int>(std::lround(pixelOffset));
-        
-        // Check if within display range
-        if (pixelX < 0 || pixelX >= surfaceWidth) continue;
-        
-        // Skip marker position itself (offsetKHz == 0)
-        if (offsetKHz == 0) continue;
-        
-        // Determine line height: longer for 10 kHz multiples, shorter for 5 kHz
-        int lineHeight;
-        if (offsetKHz % 10 == 0) {
-            lineHeight = 20;  // Longer line for 10 kHz multiples
-        } else {
-            lineHeight = 10;  // Short line for 5 kHz intervals
+        int pixelX = markerX + static_cast<int>(std::lround(pixelOffset));
+        if (pixelX < 0 || pixelX >= surfaceWidth || offsetKHz == 0) continue;
+        int lineHeight = (offsetKHz % 10 == 0) ? 20 : 10;
+        for (int y = markerY; y < markerY + lineHeight && y < surfaceHeight; y++) {
+            if (y >= 0) dest[y * stride + pixelX] = YELLOW;
         }
-        
-        // Draw vertical grid line
-        for (int y = markerPixelY; y < markerPixelY + lineHeight && y < surfaceHeight; y++) {
-            if (y >= 0) {
-                dest[y * stride + pixelX] = YELLOW;
-            }
-        }
-        
-        // Draw text for 10 kHz multiples
-        if (offsetKHz % 10 == 0) {
-            drawNum(pixelX, markerPixelY + lineHeight + 2, offsetKHz);
-        }
+        if (offsetKHz % 10 == 0) drawNum(pixelX, markerY + lineHeight + 2, offsetKHz);
+    }
+}
+
+void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int markerPixelY) {
+    if (markerPixelX < 0 || markerPixelX >= surfaceWidth) return;
+    const int FFT_SIZE = 2048;
+    const int BASE_BINS = FFT_SIZE / 4;
+    const float HZ_PER_BIN = static_cast<float>(currentSampleRate) / FFT_SIZE;
+    int visibleBins = zoomEnabled ? BASE_BINS / 2 : BASE_BINS;
+    float Hz_per_pixel = static_cast<float>(visibleBins) * HZ_PER_BIN / static_cast<float>(surfaceWidth);
+    drawArrowHead(dest, stride, markerPixelX, markerPixelY);
+    drawFrequencyGridLines(dest, stride, markerPixelX, markerPixelY, Hz_per_pixel);
+}
+
+// --- Color Scale Helper Functions ---
+
+static void applyRainbowScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
+    double norm = intensityInt / 255.0;
+    if (norm < 0.25) {
+        double t = norm * 4.0;
+        r = 0; g = 0; b = static_cast<uint8_t>(t * 255);
+    } else if (norm < 0.5) {
+        double t = (norm - 0.25) * 4.0;
+        r = 0; g = static_cast<uint8_t>(t * 255);
+        b = static_cast<uint8_t>((1.0 - t) * 255 + t * 150);
+    } else if (norm < 0.75) {
+        double t = (norm - 0.5) * 4.0;
+        r = static_cast<uint8_t>(t * 255); g = 255;
+        b = static_cast<uint8_t>((1.0 - t) * 150);
+    } else {
+        double t = (norm - 0.75) * 4.0;
+        r = 255; g = static_cast<uint8_t>((1.0 - t) * 255); b = 0;
+    }
+}
+
+static void applyLightBlueScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
+    double norm = intensityInt / 255.0;
+    if (norm < 0.33) {
+        r = 0; g = 0; b = static_cast<uint8_t>(norm * 3.0 * 150);
+    } else if (norm < 0.66) {
+        double t = (norm - 0.33) * 3.0;
+        r = 0; g = static_cast<uint8_t>(t * 206);
+        b = static_cast<uint8_t>(150 + t * 105);
+    } else {
+        double t = (norm - 0.66) * 3.0;
+        r = static_cast<uint8_t>(t * 255);
+        g = static_cast<uint8_t>(206 + t * 49); b = 255;
+    }
+}
+
+static void applyGrayscaleScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
+    auto gray = static_cast<uint8_t>(intensityInt);
+    r = gray; g = gray; b = gray;
+}
+
+static void applyCoolHotScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
+    double norm = intensityInt / 255.0;
+    if (norm < 0.25) {
+        double t = norm * 4.0;
+        r = static_cast<uint8_t>(t * 100); g = 0; b = static_cast<uint8_t>(t * 150);
+    } else if (norm < 0.5) {
+        double t = (norm - 0.25) * 4.0;
+        r = static_cast<uint8_t>(100 + t * 155); g = 0;
+        b = static_cast<uint8_t>((1.0 - t) * 150);
+    } else if (norm < 0.75) {
+        double t = (norm - 0.5) * 4.0;
+        r = 255; g = static_cast<uint8_t>(t * 200); b = 0;
+    } else {
+        double t = (norm - 0.75) * 4.0;
+        r = 255; g = static_cast<uint8_t>(200 + t * 55);
+        b = static_cast<uint8_t>(t * 255);
     }
 }
 
@@ -301,93 +303,13 @@ uint32_t getColor(double intensity) {
     uint8_t r, g, b;
     
     if (colorScale == 0) {
-        // Classic SDR Waterfall Rainbow: Deep Blue -> Light Blue -> Green -> Yellow -> Red
-        double norm = intensityInt / 255.0;
-        
-        // 4 color segments:
-        // 0.00-0.25: Black to Deep Blue
-        // 0.25-0.50: Deep Blue to Cyan/Green
-        // 0.50-0.75: Green to Yellow
-        // 0.75-1.00: Yellow to Red
-        
-        if (norm < 0.25) {
-            double t = norm * 4.0;
-            r = 0;
-            g = 0;
-            b = (uint8_t)(t * 255);
-        } else if (norm < 0.5) {
-            double t = (norm - 0.25) * 4.0;
-            r = 0;
-            g = (uint8_t)(t * 255);
-            b = (uint8_t)((1.0 - t) * 255 + t * 150); // don't zero blue entirely too fast
-        } else if (norm < 0.75) {
-            double t = (norm - 0.5) * 4.0;
-            r = (uint8_t)(t * 255);
-            g = 255;
-            b = (uint8_t)((1.0 - t) * 150); // fade out blue
-        } else {
-            double t = (norm - 0.75) * 4.0;
-            r = 255;
-            g = (uint8_t)((1.0 - t) * 255); // fade green to get pure red
-            b = 0;
-        }
+        applyRainbowScale(intensityInt, r, g, b);
     } else if (colorScale == 1) {
-        // Light Blue Waterfall: Black -> Dark Blue -> Standard Blue -> Cyan -> White
-        double norm = intensityInt / 255.0;
-        if (norm < 0.33) {
-            // Black to Dark Blue
-            double t = norm * 3.0; // 0 to 1
-            r = 0;
-            g = 0;
-            b = (uint8_t)(t * 150);
-        } else if (norm < 0.66) {
-            // Dark Blue to Cyan/Light Blue
-            double t = (norm - 0.33) * 3.0; // 0 to 1
-            r = 0;
-            g = (uint8_t)(t * 206);
-            b = (uint8_t)(150 + t * 105); // 150 -> 255
-        } else {
-            // Cyan/Light Blue to White (peak indicator)
-            double t = (norm - 0.66) * 3.0; // 0 to 1
-            r = (uint8_t)(t * 255);
-            g = (uint8_t)(206 + t * 49);  // 206 -> 255
-            b = 255;
-        }
+        applyLightBlueScale(intensityInt, r, g, b);
     } else if (colorScale == 2) {
-        // Grayscale: black -> white
-        auto gray = static_cast<uint8_t>(intensityInt);
-        r = gray;
-        g = gray;
-        b = gray;
+        applyGrayscaleScale(intensityInt, r, g, b);
     } else {  // colorScale == 3
-        // Cool-Hot (SDR Plasma/Inferno style): Black -> Dark Purple -> Red -> Orange -> Yellow -> White
-        double norm = intensityInt / 255.0;
-        
-        if (norm < 0.25) {
-            // Black to Dark Purple
-            double t = norm * 4.0;
-            r = (uint8_t)(t * 100);
-            g = 0;
-            b = (uint8_t)(t * 150);
-        } else if (norm < 0.5) {
-            // Dark Purple to Red
-            double t = (norm - 0.25) * 4.0;
-            r = (uint8_t)(100 + t * 155);
-            g = 0;
-            b = (uint8_t)((1.0 - t) * 150);
-        } else if (norm < 0.75) {
-            // Red to Orange/Yellow
-            double t = (norm - 0.5) * 4.0;
-            r = 255;
-            g = (uint8_t)(t * 200);
-            b = 0;
-        } else {
-            // Yellow to White (highest peaks)
-            double t = (norm - 0.75) * 4.0;
-            r = 255;
-            g = (uint8_t)(200 + t * 55);
-            b = (uint8_t)(t * 255);
-        }
+        applyCoolHotScale(intensityInt, r, g, b);
     }
     
     return 0xFF000000 | (b << 16) | (g << 8) | r;
@@ -566,7 +488,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
             logMag = 10.0 * log10(interpMagSq + 1e-12) + 120.0;
         } else {
             // NORMAL MODE: direct bin lookup (as before)
-            int binIdxInSpan = (x * visibleBins) * invSurfaceWidth;
+            int binIdxInSpan = static_cast<int>((x * visibleBins) * invSurfaceWidth);
             int binIdx = startBin + binIdxInSpan;
             
             // Wrap bin index to handle negative frequencies
@@ -733,119 +655,97 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
 // Oboe JNI Methods
 // ============================================================================
 
+// --- Audio Capture Helpers ---
+
+struct AudioThreadEnv {
+    JNIEnv* env;
+    jmethodID processAndDrawMethod;
+    int16_t* buffer;
+    bool attached;
+};
+
+static bool setupAudioEnvironment(AudioThreadEnv& audio) {
+    audio.env = nullptr;
+    audio.attached = false;
+    audio.buffer = nullptr;
+
+    if (g_vm->GetEnv((void**)&audio.env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        g_vm->AttachCurrentThread(&audio.env, nullptr);
+        audio.attached = true;
+    }
+    if (audio.env == nullptr) {
+        LOGI("ERROR: Failed to get JNI environment");
+        return false;
+    }
+
+    const int32_t fftSize = 2048;
+    audio.buffer = new int16_t[fftSize * 2];
+
+    jclass mainActivityClass = audio.env->GetObjectClass(g_mainActivityRef);
+    if (mainActivityClass == nullptr) {
+        LOGI("ERROR: Failed to get mainActivityClass");
+        delete[] audio.buffer;
+        if (audio.attached) g_vm->DetachCurrentThread();
+        return false;
+    }
+
+    audio.processAndDrawMethod = audio.env->GetMethodID(
+        mainActivityClass, "processAndDraw", "([SILandroid/view/Surface;)V");
+
+    if (audio.processAndDrawMethod == nullptr) {
+        LOGI("ERROR: Failed to find processAndDraw method");
+        audio.env->DeleteLocalRef(mainActivityClass);
+        delete[] audio.buffer;
+        if (audio.attached) g_vm->DetachCurrentThread();
+        return false;
+    }
+
+    audio.env->DeleteLocalRef(mainActivityClass);
+    return true;
+}
+
 // Audio capture thread function
 void audioReadingThread() {
     if (g_audioCapture == nullptr || !g_isCapturing) return;
 
-    JNIEnv* env = nullptr;
-    bool attached = false;
-    if (g_vm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-        g_vm->AttachCurrentThread(&env, nullptr);
-        attached = true;
-    }
+    AudioThreadEnv audio{};
+    if (!setupAudioEnvironment(audio)) return;
 
-    if (env == nullptr) {
-        LOGI("ERROR: Failed to get JNI environment in audioReadingThread");
-        return;
-    }
-
-    const int32_t fftSize = 2048;  // Match processAndDraw FFT size
+    const int32_t fftSize = 2048;
     const int32_t framesPerRead = fftSize;
-    auto* buffer = new int16_t[framesPerRead * 2]; // stereo
-
-    jclass mainActivityClass = env->GetObjectClass(g_mainActivityRef);
-    if (mainActivityClass == nullptr) {
-        LOGI("ERROR: Failed to get mainActivityClass");
-        delete[] buffer;
-        if (attached) g_vm->DetachCurrentThread();
-        return;
-    }
-
-    jmethodID processAndDrawMethod = env->GetMethodID(
-        mainActivityClass, "processAndDraw", "([SILandroid/view/Surface;)V");
-
-    if (processAndDrawMethod == nullptr) {
-        LOGI("ERROR: Failed to find processAndDraw method");
-        env->DeleteLocalRef(mainActivityClass);
-        delete[] buffer;
-        if (attached) g_vm->DetachCurrentThread();
-        return;
-    }
-
-    LOGI("audioReadingThread: Started with mainActivityRef=%p, processAndDrawMethod=%p", g_mainActivityRef, processAndDrawMethod);
-
-    int readCount = 0;
-    int monoDetectCount = 0;
-    int stereoDetectCount = 0;
 
     while (g_isCapturing && g_audioCapture != nullptr) {
-        int32_t framesRead = g_audioCapture->readFrames(buffer, framesPerRead);
+        int32_t framesRead = g_audioCapture->readFrames(audio.buffer, framesPerRead);
         if (framesRead < 0) {
             LOGI("AAudio read error");
             break;
         }
         if (framesRead == 0) {
-            // No data available, sleep briefly
             usleep(1000);
             continue;
         }
 
-        // Check if data is truly stereo or mono
-        if (readCount % 10 == 0) {  // Log every 10 reads
-            int64_t diffSum = 0;
-            int16_t minVal = 32767, maxVal = -32768;
-            int16_t left0 = 0, right0 = 0, left1 = 0, right1 = 0;
-            
-            for (int i = 0; i < framesRead && i < 5; i++) {
-                int16_t left = buffer[2*i];
-                int16_t right = buffer[2*i + 1];
-                if (i == 0) { left0 = left; right0 = right; }
-                if (i == 1) { left1 = left; right1 = right; }
-                diffSum += abs(left - right);
-                minVal = (left < minVal) ? left : minVal;
-                maxVal = (left > maxVal) ? left : maxVal;
-            }
-            
-            if (diffSum < 100) {
-                monoDetectCount++;
-                LOGI("Read %d: MONO (diffSum=%lld) L/R[0]=(%d,%d) L/R[1]=(%d,%d) range=[%d,%d]", 
-                     readCount, (long long)diffSum, left0, right0, left1, right1, minVal, maxVal);
-            } else {
-                stereoDetectCount++;
-                LOGI("Read %d: STEREO (diffSum=%lld) L/R[0]=(%d,%d) L/R[1]=(%d,%d)", 
-                     readCount, (long long)diffSum, left0, right0, left1, right1);
-            }
-        }
-        readCount++;
-
-        // Create Java short array from buffer
-        jshortArray javaBuffer = env->NewShortArray(framesRead * 2);
+        jshortArray javaBuffer = audio.env->NewShortArray(framesRead * 2);
         if (javaBuffer == nullptr) {
             LOGI("ERROR: Failed to create short array for framesRead=%d", framesRead * 2);
             continue;
         }
-        env->SetShortArrayRegion(javaBuffer, 0, framesRead * 2, buffer);
+        audio.env->SetShortArrayRegion(javaBuffer, 0, framesRead * 2, audio.buffer);
 
-        // Call processAndDraw callback with the Surface reference (if available)
-        jobject surface = g_surfaceRef;  // Use the stored surface reference
-        if (readCount % 100 == 0) {
-            LOGI("Calling processAndDraw: framesRead=%d, surface=%p, mainActivityRef=%p", framesRead * 2, surface, g_mainActivityRef);
-        }
-        
-        env->CallVoidMethod(g_mainActivityRef, processAndDrawMethod, javaBuffer, framesRead * 2, surface);
-        
-        // Check for JNI exceptions
-        if (env->ExceptionCheck()) {
+        jobject surface = g_surfaceRef;
+
+        audio.env->CallVoidMethod(g_mainActivityRef, audio.processAndDrawMethod, javaBuffer, framesRead * 2, surface);
+
+        if (audio.env->ExceptionCheck()) {
             LOGI("ERROR: Exception in CallVoidMethod");
-            env->ExceptionDescribe();
-            env->ExceptionClear();
+            audio.env->ExceptionDescribe();
+            audio.env->ExceptionClear();
         }
-        
-        env->DeleteLocalRef(javaBuffer);
+
+        audio.env->DeleteLocalRef(javaBuffer);
     }
 
-    delete[] buffer;
-    if (attached) g_vm->DetachCurrentThread();
+    if (audio.attached) g_vm->DetachCurrentThread();
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
