@@ -1,7 +1,10 @@
 #include <jni.h>
 #include <string>
 #include <vector>
+#include <array>
 #include <cmath>
+#include <chrono>
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -16,7 +19,12 @@
 std::mutex g_mutex;
 int surfaceWidth = 0;
 int surfaceHeight = 0;
+constexpr int kTopMargin = 15;
 std::vector<uint32_t> waterfallBuffer;
+int waterfallHeadRow = 0;
+std::atomic<int> g_renderHeadSnapshot{0};  // atomic snapshot for render thread
+static std::vector<double> g_lineMagnitudes; // spectrum data for render thread
+static std::mutex g_spectrumMutex;           // protects g_lineMagnitudes
 std::vector<double> spectrumDecayBuffer;
 int sensitivityValue = 100;
 int contrastValue = 100;
@@ -25,7 +33,9 @@ bool swapIQEnabled = false;
 bool zoomEnabled = false;
 bool fastWaterfallEnabled = false;
 bool showSpectrumEnabled = false;
-int colorScale = 0;  // 0-3: existing scales, 4: Viridis, 5: Turbo, 6: Green Phosphor
+bool isSpectrumFilled = false;  // true: filled bars, false: lines (default)
+bool isSpectrumConstantColor = false;  // true: use constant middle color, false: use dynamic color (default)
+int colorScale = 0;  // 0: Rainbow, 1: Light Blue, 2: Grayscale, 3: Cool-Hot, 4: Green Phosphor, 5: LCD
 
 // Spectrum gain smoothing
 double smoothedMinMag = 110.0;
@@ -40,43 +50,59 @@ bool g_isCapturing = false;
 static JavaVM* g_vm = nullptr;
 static jobject g_mainActivityRef = nullptr;
 static jobject g_surfaceRef = nullptr;
+static ANativeWindow* g_nativeWindow = nullptr;
 
-void fft(std::vector<double>& real, std::vector<double>& imag) {
+void fft(std::vector<float>& real, std::vector<float>& imag) {
     size_t n = real.size();
     if (n <= 1) return;
 
-    std::vector<double> real_even(n / 2), imag_even(n / 2);
-    std::vector<double> real_odd(n / 2), imag_odd(n / 2);
-
-    for (size_t i = 0; i < n / 2; i++) {
-        real_even[i] = real[2 * i];
-        imag_even[i] = imag[2 * i];
-        real_odd[i] = real[2 * i + 1];
-        imag_odd[i] = imag[2 * i + 1];
+    // Bit-reversal permutation
+    for (size_t i = 1, j = 0; i < n; i++) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            std::swap(real[i], real[j]);
+            std::swap(imag[i], imag[j]);
+        }
     }
 
-    fft(real_even, imag_even);
-    fft(real_odd, imag_odd);
-
-    for (size_t i = 0; i < n / 2; i++) {
-        double angle = -2.0 * M_PI * i / n;
-        double wr = cos(angle);
-        double wi = sin(angle);
-        double tr = wr * real_odd[i] - wi * imag_odd[i];
-        double ti = wr * imag_odd[i] + wi * real_odd[i];
-        real[i] = real_even[i] + tr;
-        imag[i] = imag_even[i] + ti;
-        real[i + n / 2] = real_even[i] - tr;
-        imag[i + n / 2] = imag_even[i] - ti;
+    // Iterative Cooley-Tukey butterfly (no heap allocation)
+    for (size_t len = 2; len <= n; len <<= 1) {
+        float ang = static_cast<float>(-2.0 * M_PI / len);
+        float wRe = cosf(ang);
+        float wIm = sinf(ang);
+        for (size_t i = 0; i < n; i += len) {
+            float curRe = 1.0f, curIm = 0.0f;
+            for (size_t j = 0; j < len / 2; j++) {
+                float uRe = real[i + j];
+                float uIm = imag[i + j];
+                float tRe = curRe * real[i + j + len/2] - curIm * imag[i + j + len/2];
+                float tIm = curRe * imag[i + j + len/2] + curIm * real[i + j + len/2];
+                real[i + j]          = uRe + tRe;
+                imag[i + j]          = uIm + tIm;
+                real[i + j + len/2]  = uRe - tRe;
+                imag[i + j + len/2]  = uIm - tIm;
+                float nextRe = curRe * wRe - curIm * wIm;
+                curIm         = curRe * wIm + curIm * wRe;
+                curRe         = nextRe;
+            }
+        }
     }
 }
+
+
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setSurfaceSize(JNIEnv* env, jobject /* this */, jint width, jint height) {
     std::lock_guard<std::mutex> lock(g_mutex);
     surfaceWidth = width;
     surfaceHeight = height;
-    waterfallBuffer.assign(width * height, 0xFF000000);
+    int waterfallRows = height > kTopMargin ? (height - kTopMargin) : 0;
+    waterfallBuffer.assign(width * waterfallRows, 0xFF000000);
+    waterfallHeadRow = 0;
+    g_renderHeadSnapshot.store(0, std::memory_order_relaxed);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -118,12 +144,25 @@ Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this
     std::lock_guard<std::mutex> lock(g_mutex);
     colorScale = scale;
     const char* scaleNames[] = {
-        "Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot",
-        "Viridis", "Turbo", "Green Phosphor"
+        "Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot", "Green Phosphor", "LCD"
     };
-    if (scale >= 0 && scale < 7) {
+    if (scale >= 0 && scale < 6) {
         LOGI("setColorScale: %d (%s)", scale, scaleNames[scale]);
     }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setSpectrumFilled(JNIEnv* env, jobject /* this */, jboolean filled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    isSpectrumFilled = (filled == JNI_TRUE);
+    LOGI("setSpectrumFilled: %s", isSpectrumFilled ? "true (filled bars)" : "false (lines)");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_setSpectrumConstantColor(JNIEnv* env, jobject /* this */, jboolean constant) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    isSpectrumConstantColor = (constant == JNI_TRUE);
+    LOGI("setSpectrumConstantColor: %s", isSpectrumConstantColor ? "true (constant color)" : "false (dynamic color)");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -209,7 +248,7 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int markerX, int 
 
 void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int markerPixelX, int markerPixelY) {
     if (markerPixelX < 0 || markerPixelX >= surfaceWidth) return;
-    const int FFT_SIZE = 2048;
+    const int FFT_SIZE = 4096;
     const int BASE_BINS = FFT_SIZE / 4;
     const float HZ_PER_BIN = static_cast<float>(currentSampleRate) / FFT_SIZE;
     int visibleBins = zoomEnabled ? BASE_BINS / 2 : BASE_BINS;
@@ -327,20 +366,44 @@ static void applyCoolHotScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t&
     }
 }
 
-uint32_t getColor(double intensity) {
+static void applyLcdScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
+    // LCD background color: #799aa4 (RGB). Stronger signal quickly shifts to dark gray then black.
+    const uint8_t baseR = 0x79;
+    const uint8_t baseG = 0x9A;
+    const uint8_t baseB = 0xA4;
+    double norm = intensityInt / 255.0;
+
+    if (norm < 0.45) {
+        double t = norm / 0.45;
+        t = pow(t, 0.75);  // darker response earlier
+        const uint8_t gray = 0x38;
+        r = lerpChannel(baseR, gray, t);
+        g = lerpChannel(baseG, gray, t);
+        b = lerpChannel(baseB, gray, t);
+    } else {
+        double t = (norm - 0.45) / 0.55;
+        t = pow(t, 0.70);  // pull into black faster
+        const uint8_t gray = 0x38;
+        r = lerpChannel(gray, 0x00, t);
+        g = lerpChannel(gray, 0x00, t);
+        b = lerpChannel(gray, 0x00, t);
+    }
+}
+
+static uint32_t getColorWithParams(double intensity, int sensitivity, int contrast, int scale) {
     // intensity is already normalized to 0-255 range from the caller
     
     if (intensity < 0) intensity = 0;
     if (intensity > 255) intensity = 255;
 
     // Apply sensitivity adjustment
-    intensity = intensity + (sensitivityValue - 100) * 0.8;
+    intensity = intensity + (sensitivity - 100) * 0.8;
     if (intensity < 0) intensity = 0;
     if (intensity > 255) intensity = 255;
 
     // Calculate contrast exponent: 100 = normal (1.833), lower/higher values adjust curve sharpness
-    // contrastValue ranges 0-300: 0 = 0.5 (soft), 100 = 1.833 (normal), 300 = 4.5 (very sharp)
-    double contrastExponent = 0.5 + (contrastValue / 300.0) * 4.0;
+    // contrast ranges 0-300: 0 = 0.5 (soft), 100 = 1.833 (normal), 300 = 4.5 (very sharp)
+    double contrastExponent = 0.5 + (contrast / 300.0) * 4.0;
     
     // Apply logarithmic curve with contrast adjustment
     intensity = intensity / 255.0;  // Normalize to 0-1
@@ -354,24 +417,74 @@ uint32_t getColor(double intensity) {
     // Apply color scale
     uint8_t r, g, b;
     
-    if (colorScale == 0) {
+    if (scale == 0) {
         applyRainbowScale(intensityInt, r, g, b);
-    } else if (colorScale == 1) {
+    } else if (scale == 1) {
         applyLightBlueScale(intensityInt, r, g, b);
-    } else if (colorScale == 2) {
+    } else if (scale == 2) {
         applyGrayscaleScale(intensityInt, r, g, b);
-    } else if (colorScale == 3) {
+    } else if (scale == 3) {
         applyCoolHotScale(intensityInt, r, g, b);
-    } else {
+    } else if (scale == 4) {
         applyGreenPhosphorScale(intensityInt, r, g, b);
+    } else {
+        applyLcdScale(intensityInt, r, g, b);
     }
     
     return 0xFF000000 | (b << 16) | (g << 8) | r;
 }
 
+uint32_t getColor(double intensity) {
+    return getColorWithParams(intensity, sensitivityValue, contrastValue, colorScale);
+}
+
+static void buildColorLut(int sensitivity, int contrast, int scale, std::array<uint32_t, 256>& lut) {
+    for (int i = 0; i < 256; i++) {
+        double intensity = static_cast<double>(i);
+
+        intensity = intensity + (sensitivity - 100) * 0.8;
+        if (intensity < 0) intensity = 0;
+        if (intensity > 255) intensity = 255;
+
+        double contrastExponent = 0.5 + (contrast / 300.0) * 4.0;
+        intensity = intensity / 255.0;
+        intensity = pow(intensity, contrastExponent);
+        intensity = intensity * 255.0;
+
+        int intensityInt = static_cast<int>(intensity);
+        if (intensityInt < 0) intensityInt = 0;
+        if (intensityInt > 255) intensityInt = 255;
+
+        uint8_t r, g, b;
+        if (scale == 0) {
+            applyRainbowScale(intensityInt, r, g, b);
+        } else if (scale == 1) {
+            applyLightBlueScale(intensityInt, r, g, b);
+        } else if (scale == 2) {
+            applyGrayscaleScale(intensityInt, r, g, b);
+        } else if (scale == 3) {
+            applyCoolHotScale(intensityInt, r, g, b);
+        } else if (scale == 4) {
+            applyGreenPhosphorScale(intensityInt, r, g, b);
+        } else {
+            applyLcdScale(intensityInt, r, g, b);
+        }
+
+        lut[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* this */, jshortArray data, jint size, jobject surface) {
-    if (surface == nullptr) return;
+    if (surface == nullptr && g_nativeWindow == nullptr) return;
+
+    using Clock = std::chrono::steady_clock;
+    auto frameStart = Clock::now();
+    int64_t unpackNs = 0;
+    int64_t fftNs = 0;
+    int64_t magPassNs = 0;
+    int64_t waterfallUpdateNs = 0;
+    int64_t windowBlitNs = 0;
 
     jshort* buffer = env->GetShortArrayElements(data, nullptr);
     if (buffer == nullptr) return;
@@ -382,97 +495,76 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         LOGI("processAndDraw first call: currentSampleRate=%d, size=%d", currentSampleRate, size);
     }
 
-    int fftSize = 2048;  // Larger FFT for better frequency resolution
+    int fftSize = 4096;  // Larger FFT for better frequency resolution
     if (size < 2 * fftSize) {
         env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
         return;
     }
 
     // Use thread_local to avoid memory allocation on every frame
-    thread_local std::vector<double> real;
-    thread_local std::vector<double> imag;
+    thread_local std::vector<float> real;
+    thread_local std::vector<float> imag;
     if (real.size() != fftSize) {
         real.resize(fftSize);
         imag.resize(fftSize);
     }
 
     {
+        auto t0 = Clock::now();
         std::lock_guard<std::mutex> lock(g_mutex);
         if (swapIQEnabled) {
             for (int i = 0; i < fftSize; i++) {
                 // I/Q handling: real = Q, imag = I
-                real[i] = buffer[2 * i + 1] / 32768.0;
-                imag[i] = buffer[2 * i] / 32768.0;
+                real[i] = buffer[2 * i + 1] / 32768.0f;
+                imag[i] = buffer[2 * i] / 32768.0f;
             }
         } else {
             for (int i = 0; i < fftSize; i++) {
                 // Stereo interpretation: left = I (Real), right = Q (Imaginary)
-                double leftSample = buffer[2 * i] / 32768.0;
-                double rightSample = buffer[2 * i + 1] / 32768.0;
+                float leftSample = buffer[2 * i] / 32768.0f;
+                float rightSample = buffer[2 * i + 1] / 32768.0f;
                 
                 // For SDR: treat left as I and right as Q (quadrature)
                 real[i] = leftSample;
                 imag[i] = rightSample;
             }
         }
+        auto t1 = Clock::now();
+        unpackNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
         
-        // Debug logging for contrast
-        static int contrastLogCount = 0;
-        if (++contrastLogCount % 50 == 0) {
-            LOGI("Contrast setting: contrastValue=%d", contrastValue);
-        }
-        
-        // Debug: log input data samples
-        static int inputLogCount = 0;
-        if (++inputLogCount % 100 == 0) {
-            int16_t minI = 32767, maxI = -32768, minQ = 32767, maxQ = -32768;
-            for (int i = 0; i < fftSize; i++) {
-                int16_t I_val = buffer[2 * i];  // Raw buffer, not normalized
-                int16_t Q_val = buffer[2 * i + 1];
-                minI = (I_val < minI) ? I_val : minI;
-                maxI = (I_val > maxI) ? I_val : maxI;
-                minQ = (Q_val < minQ) ? Q_val : minQ;
-                maxQ = (Q_val > maxQ) ? Q_val : maxQ;
-            }
-            LOGI("FFT Input RAW: I[min=%d, max=%d, range=%d], Q[min=%d, max=%d, range=%d]", 
-                 minI, maxI, maxI-minI, minQ, maxQ, maxQ-minQ);
-        }
     }
     env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
 
+    auto fftStart = Clock::now();
     fft(real, imag);
+    auto fftEnd = Clock::now();
+    fftNs += std::chrono::duration_cast<std::chrono::nanoseconds>(fftEnd - fftStart).count();
     
-    // Check FFT output immediately
-    static int fftCheckCount = 0;
-    if (++fftCheckCount % 20 == 0) {
-        double mag0 = sqrt(real[0]*real[0] + imag[0]*imag[0]);
-        double mag128 = sqrt(real[128]*real[128] + imag[128]*imag[128]);
-        double mag512 = sqrt(real[512]*real[512] + imag[512]*imag[512]);
-        
-        LOGI("FFT Check #%d [SWAP=%d]: mag[0]=%.6f, mag[128]=%.6f, mag[512]=%.6f, real[0]=%.6f, imag[0]=%.6f",
-             fftCheckCount, (int)swapIQEnabled, mag0, mag128, mag512, real[0], imag[0]);
-    }
-
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (surfaceWidth <= 0 || surfaceHeight <= 0 || waterfallBuffer.size() != (size_t)(surfaceWidth * surfaceHeight)) {
+    int TOP_MARGIN = kTopMargin;
+    int waterfallRows = surfaceHeight - TOP_MARGIN;
+    
+    // Copy volatile settings to avoid race conditions during rendering
+    bool spectrum_filled = isSpectrumFilled;
+    bool show_spectrum = showSpectrumEnabled;
+    bool spectrum_constant_color = isSpectrumConstantColor;
+    
+    size_t expectedWaterfallSize = waterfallRows > 0 ? static_cast<size_t>(surfaceWidth * waterfallRows) : 0;
+    if (surfaceWidth <= 0 || surfaceHeight <= 0 || waterfallBuffer.size() != expectedWaterfallSize) {
         return;
     }
 
-    int TOP_MARGIN = 15;
-    int shiftRows = fastWaterfallEnabled ? 2 : 1;
+    int shiftRows = fastWaterfallEnabled ? 3 : 2;
 
-    if (!showSpectrumEnabled) {
-        // Shift waterfall down
-        for (int y = surfaceHeight - 1; y >= TOP_MARGIN + shiftRows; y--) {
-            memcpy(&waterfallBuffer[y * surfaceWidth], &waterfallBuffer[(y - shiftRows) * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+    if (!show_spectrum && waterfallRows > 0) {
+        auto t0 = Clock::now();
+        int rowAdvance = shiftRows < waterfallRows ? shiftRows : waterfallRows;
+        waterfallHeadRow -= rowAdvance;
+        while (waterfallHeadRow < 0) {
+            waterfallHeadRow += waterfallRows;
         }
-        
-        // Clear top margin to black (fully opaque)
-        for (int y = 0; y < TOP_MARGIN; y++) {
-            for (int x = 0; x < surfaceWidth; x++) {
-                waterfallBuffer[y * surfaceWidth + x] = 0xFF000000;
-            }
-        }
+        auto t1 = Clock::now();
+        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     }
 
     // I/Q positive frequencies (0 Hz to Nyquist)
@@ -494,11 +586,6 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         startBin = -(visibleBins / 2);
     }
     
-    LOGI("Spectrum: %s, visibleBins=%d, startBin=%d, fftSize=%d, sampleRate=%d, displayBW=%.1f kHz, Hz/pixel=%.1f", 
-         zoomEnabled ? "ZOOM +8kHz (interpolated)" : "normal ±24kHz", visibleBins, startBin, fftSize, currentSampleRate, 
-         (float)visibleBins * currentSampleRate / fftSize / 1000,
-         (float)visibleBins * currentSampleRate / fftSize / surfaceWidth);
-
     // Draw new line
     double minMag = 1e9, maxMag = -1e9;
     
@@ -512,6 +599,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     // Scale precalculations to avoid excessive divisions inside loop
     double invSurfaceWidth = 1.0 / surfaceWidth;
     
+    auto magStart = Clock::now();
     for (int x = 0; x < surfaceWidth; x++) {
         double logMag;
         
@@ -558,6 +646,8 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
         if (logMag < minMag) minMag = logMag;
         if (logMag > maxMag) maxMag = logMag;
     }
+    auto magEnd = Clock::now();
+    magPassNs += std::chrono::duration_cast<std::chrono::nanoseconds>(magEnd - magStart).count();
     
     // Process min/max smoothing based on display type
     double alpha = showSpectrumEnabled ? 1.0 : 0.4;  // Smoothing factor: 1.0 = instant for spectrum, 0.4 = smooth for waterfall
@@ -565,12 +655,25 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
     smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
     
     // Second pass: draw with normalized intensity using smoothed min/max
-    if (!showSpectrumEnabled) {
+    if (!showSpectrumEnabled && waterfallRows > 0) {
+        auto t0 = Clock::now();
+        thread_local std::array<uint32_t, 256> colorLut;
+        thread_local int lutSensitivity = -1;
+        thread_local int lutContrast = -1;
+        thread_local int lutScale = -1;
+
+        if (lutSensitivity != sensitivityValue || lutContrast != contrastValue || lutScale != colorScale) {
+            buildColorLut(sensitivityValue, contrastValue, colorScale, colorLut);
+            lutSensitivity = sensitivityValue;
+            lutContrast = contrastValue;
+            lutScale = colorScale;
+        }
+
         double range = smoothedMaxMag - smoothedMinMag + 1e-6;  // Avoid division by zero
         double invRange = 255.0 / range;
         
-        // Fill the first new row sequentially
-        uint32_t* firstRowBuffer = &waterfallBuffer[TOP_MARGIN * surfaceWidth];
+        // Fill the newest ring-buffer row sequentially
+        uint32_t* firstRowBuffer = &waterfallBuffer[waterfallHeadRow * surfaceWidth];
         for (int x = 0; x < surfaceWidth; x++) {
             double logMag = lineMagnitudes[x];
             
@@ -578,47 +681,49 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
             double normalizedIntensity = (logMag - smoothedMinMag) * invRange;
             // Fast clamp
             normalizedIntensity = normalizedIntensity < 0.0 ? 0.0 : (normalizedIntensity > 255.0 ? 255.0 : normalizedIntensity);
-            
-            firstRowBuffer[x] = getColor(normalizedIntensity);
+
+            firstRowBuffer[x] = colorLut[static_cast<int>(normalizedIntensity)];
         }
         
-        // Copy the first row if shiftRows > 1
-        for (int r = 1; r < shiftRows; r++) {
-            memcpy(&waterfallBuffer[(TOP_MARGIN + r) * surfaceWidth], firstRowBuffer, surfaceWidth * sizeof(uint32_t));
+        // Duplicate newest rows for fast waterfall mode.
+        int duplicateRows = shiftRows < waterfallRows ? shiftRows : waterfallRows;
+        for (int r = 1; r < duplicateRows; r++) {
+            int physicalRow = waterfallHeadRow + r;
+            if (physicalRow >= waterfallRows) {
+                physicalRow -= waterfallRows;
+            }
+            memcpy(&waterfallBuffer[physicalRow * surfaceWidth], firstRowBuffer, surfaceWidth * sizeof(uint32_t));
         }
+        auto t1 = Clock::now();
+        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     }
-    static int drawCount = 0;
-    if (++drawCount % 10 == 0) {
-        // Log first few FFT bins to see actual magnitude values
-        const char* mode = swapIQEnabled ? "I/Q_SWAP" : "I/Q";
-        LOGI("FFT Draw #%d [%s]: frameMag=[%.1f-%.1f], smoothedMag=[%.1f-%.1f], bins: [%.1f, %.1f, %.1f, %.1f, %.1f]",
-             drawCount, mode, minMag, maxMag, smoothedMinMag, smoothedMaxMag,
-             20*log10(fabs(sqrt(real[0]*real[0]+imag[0]*imag[0]))+1e-6)+120,
-             20*log10(fabs(sqrt(real[1]*real[1]+imag[1]*imag[1]))+1e-6)+120,
-             20*log10(fabs(sqrt(real[256]*real[256]+imag[256]*imag[256]))+1e-6)+120,
-             20*log10(fabs(sqrt(real[512]*real[512]+imag[512]*imag[512]))+1e-6)+120,
-             20*log10(fabs(sqrt(real[768]*real[768]+imag[768]*imag[768]))+1e-6)+120);
+   
+    auto blitStart = Clock::now();
+    ANativeWindow* window = g_nativeWindow;
+    bool temporaryWindow = false;
+    if (window == nullptr && surface != nullptr) {
+        window = ANativeWindow_fromSurface(env, surface);
+        temporaryWindow = (window != nullptr);
     }
-
-    ANativeWindow* window = ANativeWindow_fromSurface(env, surface);
     if (window) {
         ANativeWindow_Buffer buffer_out;
         if (ANativeWindow_lock(window, &buffer_out, nullptr) == 0) {
             if (buffer_out.width >= surfaceWidth && buffer_out.height >= surfaceHeight) {
                 auto* dest = static_cast<uint32_t*>(buffer_out.bits);
                 
-                if (showSpectrumEnabled) {
+                if (show_spectrum) {
                     if (spectrumDecayBuffer.size() != (size_t)surfaceWidth) {
                         spectrumDecayBuffer.assign(surfaceWidth, -1000.0);
                     }
-                    // Clear background to black (Optimized 32-bit SIMD fill)
+                    // LCD scale uses LCD-colored background; other scales use black.
+                    const uint32_t spectrumBackgroundColor = (colorScale == 5) ? 0xFFA49A79 : 0xFF000000;
+
+                    // Clear full background (including area above spectrum)
                     if (buffer_out.stride == surfaceWidth) {
-                        // Contiguous memory: blast it all at once
-                        std::fill_n(dest, surfaceWidth * surfaceHeight, 0xFF000000);
+                        std::fill_n(dest, surfaceWidth * surfaceHeight, spectrumBackgroundColor);
                     } else {
-                        // Memory has padding: fill row by row using optimized blocks
                         for (int y = 0; y < surfaceHeight; y++) {
-                            std::fill_n(&dest[y * buffer_out.stride], surfaceWidth, 0xFF000000);
+                            std::fill_n(&dest[y * buffer_out.stride], surfaceWidth, spectrumBackgroundColor);
                         }
                     }
                     // Draw spectrum chart
@@ -653,36 +758,75 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
                         // so that deeply dipped signals don't turn completely black and disappear 
                         // against the black background.
                         double colorNormalized = normalized < 0.2 ? 0.2 : normalized;
-                        uint32_t traceColor;
-                        if (colorScale == 1) { // Light Blue -> Solid Light Blue trace
-                            traceColor = 0xFFFFBF00; 
-                        } else if (colorScale == 2) { // Grayscale -> Solid White trace
-                            traceColor = 0xFFFFFFFF; // White
-                        } else {
-                            traceColor = getColor(colorNormalized * 255.0);
+                        
+                        // If constant color mode, use 3/4 scale value instead of normalized value
+                        if (spectrum_constant_color) {
+                            colorNormalized = 0.75;  // 3/4 of scale
                         }
+                        
+                        uint32_t traceColor = getColor(colorNormalized * 255.0);
                         
                         int yPos = surfaceHeight - 1 - (int)(normalized * plotHeight);
                         yPos = yPos < TOP_MARGIN ? TOP_MARGIN : (yPos >= surfaceHeight ? surfaceHeight - 1 : yPos);
                         
-                        if (prevY != -1) {
-                            // Draw continuous line between prevY and yPos
-                            int step = (yPos > prevY) ? 1 : -1;
-                            int y = prevY;
-                            while (y != yPos) {
+                        if (spectrum_filled) {
+                            // Draw filled bar from bottom (plotHeight) down to yPos
+                            int bottomY = surfaceHeight - 1;
+                            for (int y = yPos; y <= bottomY; y++) {
                                 dest[y * buffer_out.stride + x] = traceColor;
-                                y += step;
                             }
-                            dest[yPos * buffer_out.stride + x] = traceColor;
                         } else {
-                            dest[yPos * buffer_out.stride + x] = traceColor;
+                            // Draw continuous line between prevY and yPos
+                            if (prevY != -1) {
+                                int step = (yPos > prevY) ? 1 : -1;
+                                int y = prevY;
+                                while (y != yPos) {
+                                    dest[y * buffer_out.stride + x] = traceColor;
+                                    y += step;
+                                }
+                                dest[yPos * buffer_out.stride + x] = traceColor;
+                            } else {
+                                dest[yPos * buffer_out.stride + x] = traceColor;
+                            }
+                            prevY = yPos;
                         }
-                        prevY = yPos;
                     }
                 } else {
                     // Draw waterfall data
-                    for (int y = 0; y < surfaceHeight; y++) {
-                        memcpy(&dest[y * buffer_out.stride], &waterfallBuffer[y * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+                    int visibleTopMargin = TOP_MARGIN < surfaceHeight ? TOP_MARGIN : surfaceHeight;
+                    if (buffer_out.stride == surfaceWidth) {
+                        if (visibleTopMargin > 0) {
+                            std::fill_n(dest, visibleTopMargin * surfaceWidth, 0xFF000000);
+                        }
+                        if (waterfallRows > 0) {
+                            int firstChunkRows = waterfallRows - waterfallHeadRow;
+                            memcpy(
+                                &dest[TOP_MARGIN * surfaceWidth],
+                                &waterfallBuffer[waterfallHeadRow * surfaceWidth],
+                                firstChunkRows * surfaceWidth * sizeof(uint32_t)
+                            );
+                            if (waterfallHeadRow > 0) {
+                                memcpy(
+                                    &dest[(TOP_MARGIN + firstChunkRows) * surfaceWidth],
+                                    waterfallBuffer.data(),
+                                    waterfallHeadRow * surfaceWidth * sizeof(uint32_t)
+                                );
+                            }
+                        }
+                    } else {
+                        for (int y = 0; y < visibleTopMargin; y++) {
+                            std::fill_n(&dest[y * buffer_out.stride], surfaceWidth, 0xFF000000);
+                        }
+                        if (waterfallRows > 0) {
+                            for (int y = TOP_MARGIN; y < surfaceHeight; y++) {
+                                int dataRow = y - TOP_MARGIN;
+                                int physicalRow = waterfallHeadRow + dataRow;
+                                if (physicalRow >= waterfallRows) {
+                                    physicalRow -= waterfallRows;
+                                }
+                                memcpy(&dest[y * buffer_out.stride], &waterfallBuffer[physicalRow * surfaceWidth], surfaceWidth * sizeof(uint32_t));
+                            }
+                        }
                     }
                 }
                 
@@ -701,7 +845,377 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
             }
             ANativeWindow_unlockAndPost(window);
         }
-        ANativeWindow_release(window);
+        if (temporaryWindow) {
+            ANativeWindow_release(window);
+        }
+    }
+    auto blitEnd = Clock::now();
+    windowBlitNs += std::chrono::duration_cast<std::chrono::nanoseconds>(blitEnd - blitStart).count();
+
+    auto frameEnd = Clock::now();
+    int64_t frameNs = std::chrono::duration_cast<std::chrono::nanoseconds>(frameEnd - frameStart).count();
+
+    thread_local int64_t profileWindowStartNs = 0;
+    thread_local int profileFrames = 0;
+    thread_local int64_t sumUnpackNs = 0;
+    thread_local int64_t sumFftNs = 0;
+    thread_local int64_t sumMagPassNs = 0;
+    thread_local int64_t sumWaterfallUpdateNs = 0;
+    thread_local int64_t sumWindowBlitNs = 0;
+    thread_local int64_t sumFrameNs = 0;
+
+    int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(frameEnd.time_since_epoch()).count();
+    if (profileWindowStartNs == 0) {
+        profileWindowStartNs = nowNs;
+    }
+
+    profileFrames++;
+    sumUnpackNs += unpackNs;
+    sumFftNs += fftNs;
+    sumMagPassNs += magPassNs;
+    sumWaterfallUpdateNs += waterfallUpdateNs;
+    sumWindowBlitNs += windowBlitNs;
+    sumFrameNs += frameNs;
+
+    if (nowNs - profileWindowStartNs >= 2000000000LL && profileFrames > 0) {
+        double invFrames = 1.0 / profileFrames;
+        LOGI(
+            "perf avg ms: frame=%.3f unpack=%.3f fft=%.3f mag=%.3f water=%.3f blit=%.3f fps=%.1f mode=%s",
+            (sumFrameNs * invFrames) / 1e6,
+            (sumUnpackNs * invFrames) / 1e6,
+            (sumFftNs * invFrames) / 1e6,
+            (sumMagPassNs * invFrames) / 1e6,
+            (sumWaterfallUpdateNs * invFrames) / 1e6,
+            (sumWindowBlitNs * invFrames) / 1e6,
+            (profileFrames * 1e9) / (double)(nowNs - profileWindowStartNs),
+            showSpectrumEnabled ? "spectrum" : "waterfall"
+        );
+
+        profileWindowStartNs = nowNs;
+        profileFrames = 0;
+        sumUnpackNs = 0;
+        sumFftNs = 0;
+        sumMagPassNs = 0;
+        sumWaterfallUpdateNs = 0;
+        sumWindowBlitNs = 0;
+        sumFrameNs = 0;
+    }
+}
+
+// ============================================================================
+// Audio-only processing (FFT + waterfall update, no blit)
+// Called from Kotlin AudioRecord thread. Decoupled from rendering so the audio
+// thread is never blocked by ANativeWindow_lock waiting for a vsync buffer.
+// ============================================================================
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshortArray data, jint size) {
+    using Clock = std::chrono::steady_clock;
+    auto frameStart = Clock::now();
+    int64_t unpackNs = 0, fftNs = 0, magPassNs = 0, waterfallUpdateNs = 0;
+
+    jshort* buffer = env->GetShortArrayElements(data, nullptr);
+    if (buffer == nullptr) return;
+
+    int fftSize = 4096;
+    if (size < 2 * fftSize) {
+        env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
+        return;
+    }
+
+    thread_local std::vector<float> real, imag;
+    if (real.size() != (size_t)fftSize) { real.resize(fftSize); imag.resize(fftSize); }
+
+    {
+        auto t0 = Clock::now();
+        std::lock_guard<std::mutex> lk(g_mutex);
+        if (swapIQEnabled) {
+            for (int i = 0; i < fftSize; i++) {
+                real[i] = buffer[2*i+1] / 32768.0f;
+                imag[i] = buffer[2*i]   / 32768.0f;
+            }
+        } else {
+            for (int i = 0; i < fftSize; i++) {
+                real[i] = buffer[2*i]   / 32768.0f;
+                imag[i] = buffer[2*i+1] / 32768.0f;
+            }
+        }
+        unpackNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+    }
+    env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
+
+    auto fftStart = Clock::now();
+    fft(real, imag);
+    fftNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - fftStart).count();
+
+    std::lock_guard<std::mutex> lk(g_mutex);
+    const int TOP_MARGIN = kTopMargin;
+    int waterfallRows = surfaceHeight - TOP_MARGIN;
+    int expectedSize = (waterfallRows > 0) ? (surfaceWidth * waterfallRows) : 0;
+    if (surfaceWidth <= 0 || surfaceHeight <= 0 || (int)waterfallBuffer.size() != expectedSize) return;
+
+    int shiftRows = fastWaterfallEnabled ? 3 : 2;
+    if (!showSpectrumEnabled && waterfallRows > 0) {
+        auto t0 = Clock::now();
+        int rowAdv = (shiftRows < waterfallRows) ? shiftRows : waterfallRows;
+        waterfallHeadRow -= rowAdv;
+        while (waterfallHeadRow < 0) waterfallHeadRow += waterfallRows;
+        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+    }
+
+    int baseBins = fftSize / 4;
+    int visibleBins, startBin;
+    if (zoomEnabled) {
+        visibleBins = baseBins / 2;
+        int binHz = currentSampleRate / fftSize;
+        startBin = (8000 / binHz) - visibleBins / 2;
+    } else {
+        visibleBins = baseBins;
+        startBin = -(visibleBins / 2);
+    }
+
+    double minMag = 1e9, maxMag = -1e9;
+    thread_local std::vector<double> lineMags;
+    if ((int)lineMags.size() != surfaceWidth) lineMags.resize(surfaceWidth);
+    double invW = 1.0 / surfaceWidth;
+
+    auto magTs = Clock::now();
+    for (int x = 0; x < surfaceWidth; x++) {
+        double logMag;
+        if (zoomEnabled) {
+            double bpr = (x * (double)visibleBins) * invW;
+            int b1 = (int)bpr, b2 = b1 + 1;
+            double f = bpr - b1;
+            int s1 = startBin + b1, s2 = startBin + b2;
+            if (s1 < 0) s1 += fftSize; else if (s1 >= fftSize) s1 -= fftSize;
+            if (s2 < 0) s2 += fftSize; else if (s2 >= fftSize) s2 -= fftSize;
+            double sq1 = real[s1]*real[s1] + imag[s1]*imag[s1];
+            double sq2 = real[s2]*real[s2] + imag[s2]*imag[s2];
+            logMag = 10.0 * log10(sq1*(1.0-f) + sq2*f + 1e-12) + 120.0;
+        } else {
+            int bi = startBin + (int)((x * visibleBins) * invW);
+            int sb = (bi >= 0) ? bi : bi + fftSize;
+            if (sb >= fftSize) sb -= fftSize;
+            double sq = real[sb]*real[sb] + imag[sb]*imag[sb];
+            logMag = 10.0 * log10(sq + 1e-12) + 120.0;
+        }
+        lineMags[x] = logMag;
+        if (logMag < minMag) minMag = logMag;
+        if (logMag > maxMag) maxMag = logMag;
+    }
+    magPassNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - magTs).count();
+
+    double alpha = showSpectrumEnabled ? 1.0 : 0.4;
+    smoothedMinMag = smoothedMinMag * (1.0 - alpha) + minMag * alpha;
+    smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
+
+    if (!showSpectrumEnabled && waterfallRows > 0) {
+        auto t0 = Clock::now();
+        thread_local std::array<uint32_t, 256> colorLut;
+        thread_local int lutSens = -1, lutContr = -1, lutSc = -1;
+        if (lutSens != sensitivityValue || lutContr != contrastValue || lutSc != colorScale) {
+            buildColorLut(sensitivityValue, contrastValue, colorScale, colorLut);
+            lutSens = sensitivityValue; lutContr = contrastValue; lutSc = colorScale;
+        }
+        double range = smoothedMaxMag - smoothedMinMag + 1e-6;
+        double invRange = 255.0 / range;
+        uint32_t* row = &waterfallBuffer[waterfallHeadRow * surfaceWidth];
+        for (int x = 0; x < surfaceWidth; x++) {
+            double ni = (lineMags[x] - smoothedMinMag) * invRange;
+            ni = ni < 0.0 ? 0.0 : (ni > 255.0 ? 255.0 : ni);
+            row[x] = colorLut[(int)ni];
+        }
+        int dupRows = (shiftRows < waterfallRows) ? shiftRows : waterfallRows;
+        for (int r = 1; r < dupRows; r++) {
+            int pr = waterfallHeadRow + r;
+            if (pr >= waterfallRows) pr -= waterfallRows;
+            memcpy(&waterfallBuffer[pr * surfaceWidth], row, surfaceWidth * sizeof(uint32_t));
+        }
+        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
+        // Publish head row for render thread with release ordering
+        g_renderHeadSnapshot.store(waterfallHeadRow, std::memory_order_release);
+    } else if (showSpectrumEnabled) {
+        std::lock_guard<std::mutex> specLk(g_spectrumMutex);
+        if ((int)g_lineMagnitudes.size() != surfaceWidth) g_lineMagnitudes.resize(surfaceWidth);
+        memcpy(g_lineMagnitudes.data(), lineMags.data(), surfaceWidth * sizeof(double));
+    }
+
+    auto frameEnd = Clock::now();
+    int64_t frameNs = std::chrono::duration_cast<std::chrono::nanoseconds>(frameEnd - frameStart).count();
+    thread_local int64_t profWin = 0; thread_local int profN = 0;
+    thread_local int64_t sU = 0, sF = 0, sM = 0, sW = 0, sFr = 0;
+    int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(frameEnd.time_since_epoch()).count();
+    if (profWin == 0) profWin = nowNs;
+    profN++; sU += unpackNs; sF += fftNs; sM += magPassNs; sW += waterfallUpdateNs; sFr += frameNs;
+    if (nowNs - profWin >= 2000000000LL && profN > 0) {
+        double inv = 1.0 / profN;
+        LOGI("audio avg ms: frame=%.3f unpack=%.3f fft=%.3f mag=%.3f water=%.3f fps=%.1f",
+            (sFr*inv)/1e6, (sU*inv)/1e6, (sF*inv)/1e6, (sM*inv)/1e6, (sW*inv)/1e6,
+            (profN * 1e9) / (double)(nowNs - profWin));
+        profWin = nowNs; profN = 0; sU = sF = sM = sW = sFr = 0;
+    }
+}
+
+// ============================================================================
+// Vsync-aligned blit (render only) - called from Choreographer on UI thread.
+// ANativeWindow_lock fires right after vsync so a buffer is always immediately
+// available, eliminating the ~5-6 ms blocking wait that was stalling the audio
+// thread and causing stutter.
+// ============================================================================
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject surface) {
+    using Clock = std::chrono::steady_clock;
+    auto blitStart = Clock::now();
+
+    ANativeWindow* window = g_nativeWindow;
+    bool tempWin = false;
+    if (!window && surface) {
+        window = ANativeWindow_fromSurface(env, surface);
+        tempWin = (window != nullptr);
+    }
+    if (!window) return;
+
+    // Read atomic head row snapshot (acquire ordering ensures waterfall pixel visibility)
+    int headRow = g_renderHeadSnapshot.load(std::memory_order_acquire);
+
+    // Dimensions are written only from the UI thread (surfaceChanged → setSurfaceSize),
+    // so reading them here on the UI thread (Choreographer) is race-free.
+    int sw = surfaceWidth, sh = surfaceHeight;
+    int waterfallRows = sh - kTopMargin;
+    
+    // Copy volatile settings under lock to prevent race conditions
+    bool showSpec;
+    bool spectrum_filled_copy;
+    bool spectrum_constant_color_copy;
+    bool fastWaterfall_copy;
+    int sensitivity_copy;
+    int contrast_copy;
+    int colorScale_copy;
+    bool zoom_copy;
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        showSpec = showSpectrumEnabled;
+        spectrum_filled_copy = isSpectrumFilled;
+        spectrum_constant_color_copy = isSpectrumConstantColor;
+        fastWaterfall_copy = fastWaterfallEnabled;
+        sensitivity_copy = sensitivityValue;
+        contrast_copy = contrastValue;
+        colorScale_copy = colorScale;
+        zoom_copy = zoomEnabled;
+    }
+
+    if (sw <= 0 || sh <= 0) { if (tempWin) ANativeWindow_release(window); return; }
+
+    ANativeWindow_Buffer buf;
+    if (ANativeWindow_lock(window, &buf, nullptr) == 0) {
+        if (buf.width >= sw && buf.height >= sh) {
+            auto* dest = static_cast<uint32_t*>(buf.bits);
+            const int TOP_MARGIN = kTopMargin;
+
+            if (showSpec) {
+                std::vector<double> lineMagCopy;
+                {
+                    std::lock_guard<std::mutex> specLk(g_spectrumMutex);
+                    lineMagCopy = g_lineMagnitudes;
+                }
+                if (!lineMagCopy.empty() && (int)lineMagCopy.size() == sw) {
+                    if ((int)spectrumDecayBuffer.size() != sw)
+                        spectrumDecayBuffer.assign(sw, -1000.0);
+                    const uint32_t spectrumBackgroundColor = (colorScale_copy == 5) ? 0xFFA49A79 : 0xFF000000u;
+                    if (buf.stride == sw)
+                        std::fill_n(dest, sw * sh, spectrumBackgroundColor);
+                    else
+                        for (int y = 0; y < sh; y++)
+                            std::fill_n(&dest[y * buf.stride], sw, spectrumBackgroundColor);
+                    double refLevel = 250.0 - sensitivity_copy;
+                    double displayRange = 160.0 - (contrast_copy / 300.0) * 140.0;
+                    double minLevel = refLevel - displayRange;
+                    double invDR = 1.0 / displayRange;
+                    double decayRate = fastWaterfall_copy ? 1.5 : 0.75;
+                    int plotH = sh - TOP_MARGIN;
+                    int prevY = -1;
+                    for (int x = 0; x < sw; x++) {
+                        double lm = lineMagCopy[x];
+                        if (lm > spectrumDecayBuffer[x]) spectrumDecayBuffer[x] = lm;
+                        else spectrumDecayBuffer[x] -= decayRate;
+                        double norm = (spectrumDecayBuffer[x] - minLevel) * invDR;
+                        norm = norm < 0.0 ? 0.0 : (norm > 1.0 ? 1.0 : norm);
+                        double cn = norm < 0.2 ? 0.2 : norm;
+                        
+                        // If constant color mode, use 3/4 of scale (0.75)
+                        if (spectrum_constant_color_copy) {
+                            cn = 0.75;
+                        }
+                        
+                        uint32_t tc = getColorWithParams(cn * 255.0, sensitivity_copy, contrast_copy, colorScale_copy);
+                        int yPos = sh - 1 - (int)(norm * plotH);
+                        yPos = yPos < TOP_MARGIN ? TOP_MARGIN : (yPos >= sh ? sh - 1 : yPos);
+                        if (spectrum_filled_copy) {
+                            // Draw filled bar from bottom to yPos
+                            int bottomY = sh - 1;
+                            for (int y = yPos; y <= bottomY; y++) {
+                                dest[y * buf.stride + x] = tc;
+                            }
+                        } else {
+                            // Draw continuous line between prevY and yPos
+                            if (prevY != -1) {
+                                int step = (yPos > prevY) ? 1 : -1;
+                                int y = prevY;
+                                while (y != yPos) { dest[y * buf.stride + x] = tc; y += step; }
+                                dest[yPos * buf.stride + x] = tc;
+                            } else dest[yPos * buf.stride + x] = tc;
+                            prevY = yPos;
+                        }
+                    }
+                }
+            } else {
+                int vtm = TOP_MARGIN < sh ? TOP_MARGIN : sh;
+                if (buf.stride == sw) {
+                    if (vtm > 0) std::fill_n(dest, vtm * sw, 0xFF000000u);
+                    if (waterfallRows > 0) {
+                        std::lock_guard<std::mutex> wfLock(g_mutex);
+                        int safeHeadRow = waterfallHeadRow;
+                        int fc = waterfallRows - safeHeadRow;
+                        memcpy(&dest[TOP_MARGIN * sw], &waterfallBuffer[safeHeadRow * sw],
+                               fc * sw * sizeof(uint32_t));
+                        if (safeHeadRow > 0)
+                            memcpy(&dest[(TOP_MARGIN + fc) * sw], waterfallBuffer.data(),
+                                   safeHeadRow * sw * sizeof(uint32_t));
+                    }
+                } else {
+                    for (int y = 0; y < vtm; y++)
+                        std::fill_n(&dest[y * buf.stride], sw, 0xFF000000u);
+                    if (waterfallRows > 0) {
+                        std::lock_guard<std::mutex> wfLock(g_mutex);
+                        int safeHeadRow = waterfallHeadRow;
+                        for (int y = TOP_MARGIN; y < sh; y++) {
+                            int pr = safeHeadRow + (y - TOP_MARGIN);
+                            if (pr >= waterfallRows) pr -= waterfallRows;
+                            memcpy(&dest[y * buf.stride], &waterfallBuffer[pr * sw],
+                                   sw * sizeof(uint32_t));
+                        }
+                    }
+                }
+            }
+
+            int mx = zoom_copy
+                ? (int)std::lround(sw / 2.325)
+                : (int)std::lround((sw * 7) / 11.05);
+            drawArrowMarkerOnWindow(dest, buf.stride, mx, 0);
+        }
+        ANativeWindow_unlockAndPost(window);
+    }
+    if (tempWin) ANativeWindow_release(window);
+
+    int64_t blitNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - blitStart).count();
+    thread_local int64_t profWin = 0; thread_local int profN = 0; thread_local int64_t sB = 0;
+    int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    if (profWin == 0) profWin = nowNs;
+    profN++; sB += blitNs;
+    if (nowNs - profWin >= 2000000000LL && profN > 0) {
+        double inv = 1.0 / profN;
+        LOGI("render avg ms: blit=%.3f fps=%.1f", (sB * inv) / 1e6,
+             (profN * 1e9) / (double)(nowNs - profWin));
+        profWin = nowNs; profN = 0; sB = 0;
     }
 }
 
@@ -713,7 +1227,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
 
 struct AudioThreadEnv {
     JNIEnv* env;
-    jmethodID processAndDrawMethod;
+    jshortArray frameArray;
     int16_t* buffer;
     bool attached;
 };
@@ -721,6 +1235,7 @@ struct AudioThreadEnv {
 static bool setupAudioEnvironment(AudioThreadEnv& audio) {
     audio.env = nullptr;
     audio.attached = false;
+    audio.frameArray = nullptr;
     audio.buffer = nullptr;
 
     if (g_vm->GetEnv((void**)&audio.env, JNI_VERSION_1_6) == JNI_EDETACHED) {
@@ -735,26 +1250,13 @@ static bool setupAudioEnvironment(AudioThreadEnv& audio) {
     const int32_t fftSize = 2048;
     audio.buffer = new int16_t[fftSize * 2 * 4]; // 4x oversized for burst reads
 
-    jclass mainActivityClass = audio.env->GetObjectClass(g_mainActivityRef);
-    if (mainActivityClass == nullptr) {
-        LOGI("ERROR: Failed to get mainActivityClass");
+    audio.frameArray = audio.env->NewShortArray(fftSize * 2);
+    if (audio.frameArray == nullptr) {
+        LOGI("ERROR: Failed to create frame array");
         delete[] audio.buffer;
         if (audio.attached) g_vm->DetachCurrentThread();
         return false;
     }
-
-    audio.processAndDrawMethod = audio.env->GetMethodID(
-        mainActivityClass, "processAndDraw", "([SILandroid/view/Surface;)V");
-
-    if (audio.processAndDrawMethod == nullptr) {
-        LOGI("ERROR: Failed to find processAndDraw method");
-        audio.env->DeleteLocalRef(mainActivityClass);
-        delete[] audio.buffer;
-        if (audio.attached) g_vm->DetachCurrentThread();
-        return false;
-    }
-
-    audio.env->DeleteLocalRef(mainActivityClass);
     return true;
 }
 
@@ -766,6 +1268,9 @@ void audioReadingThread() {
     if (!setupAudioEnvironment(audio)) return;
 
     const int32_t fftSize = 2048;
+    constexpr double kTargetRenderFps = 60.0;
+    double renderBudget = 0.0;
+
     // Accumulator: collects burst-sized reads until we have a full fftSize frame
     std::vector<int16_t> accumulator;
     accumulator.reserve(fftSize * 2);
@@ -791,13 +1296,7 @@ void audioReadingThread() {
             continue;
         }
 
-        jshortArray javaBuffer = audio.env->NewShortArray(fftSize * 2);
-        if (javaBuffer == nullptr) {
-            LOGI("ERROR: Failed to create short array");
-            accumulator.clear();
-            continue;
-        }
-        audio.env->SetShortArrayRegion(javaBuffer, 0, fftSize * 2, accumulator.data());
+        audio.env->SetShortArrayRegion(audio.frameArray, 0, fftSize * 2, accumulator.data());
 
         // Keep any excess samples for the next frame (sliding window)
         if ((int32_t)accumulator.size() > fftSize * 2) {
@@ -806,18 +1305,33 @@ void audioReadingThread() {
             accumulator.clear();
         }
 
-        jobject surface = g_surfaceRef;
-        audio.env->CallVoidMethod(g_mainActivityRef, audio.processAndDrawMethod, javaBuffer, fftSize * 2, surface);
-
-        if (audio.env->ExceptionCheck()) {
-            LOGI("ERROR: Exception in CallVoidMethod");
-            audio.env->ExceptionDescribe();
-            audio.env->ExceptionClear();
+        bool shouldRender = true;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (!showSpectrumEnabled) {
+                double sourceWindowsPerSecond = static_cast<double>(currentSampleRate) / fftSize;
+                if (sourceWindowsPerSecond > kTargetRenderFps) {
+                    renderBudget += kTargetRenderFps;
+                    if (renderBudget >= sourceWindowsPerSecond) {
+                        renderBudget -= sourceWindowsPerSecond;
+                    } else {
+                        shouldRender = false;
+                    }
+                }
+            }
+        }
+        if (!shouldRender) {
+            continue;
         }
 
-        audio.env->DeleteLocalRef(javaBuffer);
+        jobject surface = g_surfaceRef;
+        Java_com_example_belkarx_MainActivity_processAndDraw(audio.env, nullptr, audio.frameArray, fftSize * 2, surface);
     }
 
+    if (audio.frameArray != nullptr) {
+        audio.env->DeleteLocalRef(audio.frameArray);
+        audio.frameArray = nullptr;
+    }
     if (audio.attached) g_vm->DetachCurrentThread();
 }
 
@@ -877,21 +1391,38 @@ Java_com_example_belkarx_MainActivity_stopOboeCapture(JNIEnv* env, jobject /* th
         env->DeleteGlobalRef(g_mainActivityRef);
         g_mainActivityRef = nullptr;
     }
+    if (g_surfaceRef != nullptr) {
+        env->DeleteGlobalRef(g_surfaceRef);
+        g_surfaceRef = nullptr;
+    }
+    if (g_nativeWindow != nullptr) {
+        ANativeWindow_release(g_nativeWindow);
+        g_nativeWindow = nullptr;
+    }
 
     LOGI("Oboe capture stopped");
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setOboeSurface(JNIEnv* env, jobject /* this */, jobject surface) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+
     // Clean up old surface reference if it exists
     if (g_surfaceRef != nullptr) {
         env->DeleteGlobalRef(g_surfaceRef);
+        g_surfaceRef = nullptr;
         LOGI("setOboeSurface: Deleted old surface reference");
+    }
+    if (g_nativeWindow != nullptr) {
+        ANativeWindow_release(g_nativeWindow);
+        g_nativeWindow = nullptr;
+        LOGI("setOboeSurface: Released old native window");
     }
     
     // Store new surface reference
     if (surface != nullptr) {
         g_surfaceRef = env->NewGlobalRef(surface);
+        g_nativeWindow = ANativeWindow_fromSurface(env, surface);
         LOGI("setOboeSurface: Updated to new surface reference %p", surface);
     } else {
         g_surfaceRef = nullptr;

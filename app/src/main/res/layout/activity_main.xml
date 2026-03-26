@@ -73,6 +73,7 @@
             android:orientation="vertical" />
 
         <LinearLayout
+            android:id="@+id/mainToggleContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
@@ -115,6 +116,35 @@
                 android:checked="false"
                 android:textOff="Fast"
                 android:textOn="Fast" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/spectrumOptionsContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:gravity="center_vertical">
+
+            <ToggleButton
+                android:id="@+id/spectrumFilledToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="false"
+                android:textOff="Filled"
+                android:textOn="Filled" />
+
+            <ToggleButton
+                android:id="@+id/spectrumConstantColorToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:checked="false"
+                android:textOff="Const Color"
+                android:textOn="Const Color" />
 
         </LinearLayout>
 

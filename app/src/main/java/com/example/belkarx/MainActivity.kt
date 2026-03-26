@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.content.res.Configuration
 import android.util.Log
+import android.view.Choreographer
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.Surface
@@ -36,8 +37,31 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val isRecording = AtomicBoolean(false)
     private var recordingThread: Thread? = null
     private var surface: Surface? = null
+    private var useVsyncRenderLoop = false
     private lateinit var gestureDetector: GestureDetector
     private lateinit var prefs: android.content.SharedPreferences
+    private val renderFrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!useVsyncRenderLoop) return
+            val s = surface
+            if (isRecording.get() && s != null) {
+                renderFrame(s)
+            }
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
+    private fun startVsyncRenderLoop() {
+        if (useVsyncRenderLoop) return
+        useVsyncRenderLoop = true
+        Choreographer.getInstance().postFrameCallback(renderFrameCallback)
+    }
+
+    private fun stopVsyncRenderLoop() {
+        if (!useVsyncRenderLoop) return
+        useVsyncRenderLoop = false
+        Choreographer.getInstance().removeFrameCallback(renderFrameCallback)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -132,15 +156,28 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.showSpectrumToggle.setOnCheckedChangeListener { _, isChecked ->
             setShowSpectrum(isChecked)
+            updateSpectrumOptionControlsEnabled(isChecked)
             saveSettings()
             Log.d("BelkaRx", "Show spectrum checkbox changed: $isChecked")
         }
 
+        binding.spectrumFilledToggle.setOnCheckedChangeListener { _, isChecked ->
+            setSpectrumFilled(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "Spectrum filled checkbox changed: $isChecked")
+        }
+
+        binding.spectrumConstantColorToggle.setOnCheckedChangeListener { _, isChecked ->
+            setSpectrumConstantColor(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "Spectrum constant color checkbox changed: $isChecked")
+        }
+
         binding.colorScaleSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                setColorScale(position)
+                setColorScale(position)             
                 saveSettings()
-                Log.d("BelkaRx", "Color scale selected: $position")
+                Log.d("BelkaRx", "Color scale selected: $position, isSpectrumFilled=${position == 4}")
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
@@ -154,7 +191,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setZoom(binding.zoomToggle.isChecked)
         setFastWaterfall(binding.fastWaterfallToggle.isChecked)
         setShowSpectrum(binding.showSpectrumToggle.isChecked)
+        setSpectrumFilled(binding.spectrumFilledToggle.isChecked)
+        setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
         setColorScale(binding.colorScaleSpinner.selectedItemPosition)
+        updateSpectrumOptionControlsEnabled(binding.showSpectrumToggle.isChecked)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQToggle.isChecked}")
 
 
@@ -163,6 +203,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateFullscreenMode(newConfig.orientation)
+    }
+
+    private fun updateSpectrumOptionControlsEnabled(isSpectrumEnabled: Boolean) {
+        binding.spectrumFilledToggle.isEnabled = isSpectrumEnabled
+        binding.spectrumConstantColorToggle.isEnabled = isSpectrumEnabled
     }
 
     private fun updateFullscreenMode(orientation: Int) {
@@ -186,9 +231,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun updateLayoutForOrientation(orientation: Int) {
         val topContainer = binding.topBarCenterContainer
         val dropdownContainer = binding.dropdownDynamicArea
+        val controlsContainer = binding.controlsContainer
+        val mainToggleContainer = binding.mainToggleContainer
         
         // Remove views from their current parents safely
-        val viewsToMove = listOf(binding.spinnerContainer, binding.sensitivityView, binding.contrastView)
+        val viewsToMove = listOf(
+            binding.spinnerContainer,
+            binding.sensitivityView,
+            binding.contrastView,
+            binding.spectrumOptionsContainer
+        )
         for (v in viewsToMove) {
             (v.parent as? ViewGroup)?.removeView(v)
         }
@@ -201,9 +253,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         fun getTopParams(marginStart: Int = 0) = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             setMargins(marginStart, 0, 0, 0)
         }
+
+        fun getSpectrumOptionsParams() = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(16, 8, 16, 0)
+        }
+
+        fun getSpectrumOptionsInlineParams() = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(8, 0, 0, 0)
+        }
         
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            // In Landscape: Sensitivity & Contrast on top, Color Scale in dropdown
+            // In Landscape: Sensitivity & Contrast on top, Color Scale in dropdown,
+            // spectrum option toggles continue inline on the main toggle row.
             binding.sensitivityView.layoutParams = getTopParams()
             binding.contrastView.layoutParams = getTopParams(16)
             topContainer.addView(binding.sensitivityView)
@@ -211,8 +278,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             
             binding.spinnerContainer.layoutParams = getDropParams()
             dropdownContainer.addView(binding.spinnerContainer)
+
+            binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsInlineParams()
+            mainToggleContainer.addView(binding.spectrumOptionsContainer)
         } else {
-            // In Portrait: Sensitivity on top, Color Scale & Contrast in dropdown
+            // In Portrait: keep spectrum option toggles on their own row.
             binding.sensitivityView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
             
@@ -220,6 +290,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.contrastView.layoutParams = getDropParams()
             dropdownContainer.addView(binding.spinnerContainer)
             dropdownContainer.addView(binding.contrastView)
+
+            binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsParams()
+            controlsContainer.addView(binding.spectrumOptionsContainer)
         }
     }
 
@@ -260,7 +333,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             "Light Blue",
             "Grayscale",
             "Cool-Hot",
-            "Green Phosphor"
+            "Green Phosphor",
+            "LCD"
         )
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, colorScales)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
@@ -404,6 +478,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 Log.w("BelkaRx", "Surface not ready after 1 second wait")
             }
 
+            startVsyncRenderLoop()
             recordingThread = Thread {
                 processAudioViaAudioRecord(audioRecord!!, bufferSize)
             }
@@ -428,10 +503,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun processAudioViaAudioRecord(recorder: AudioRecord, minBufferSize: Int) {
         Log.i("BelkaRx", "AudioRecord processing thread started (minBufferSize=$minBufferSize bytes)")
         
-        val fftSize = 2048
-        // Read in small chunks (~1 FFT window = 2048 stereo frames = 4096 shorts = 8192 bytes)
+        val fftSize = 4096
+        // Read in small chunks (~1 FFT window = 4096 stereo frames = 8192 shorts = 16384 bytes)
         // minBufferSize is in bytes; convert to shorts and cap at one FFT window size
-        val readChunkShorts = fftSize * 2  // 4096 shorts per read
+        val readChunkShorts = fftSize * 2  // 8192 shorts per read
         val shortBuf = ShortArray(readChunkShorts)
         Log.i("BelkaRx", "AudioRecord read chunk: $readChunkShorts shorts (${readChunkShorts * 2} bytes)")
 
@@ -510,7 +585,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             if (processCount % 10 == 0) {
                                 Log.d("BelkaRx", "Calling processAndDraw (count=$processCount, bufSize=${fftSize*2}, stereo=$stereoCount, mono=$monoCount)")
                             }
-                            processAndDraw(outputBuf, fftSize * 2, surface!!)
+
+                            processAudioData(outputBuf, outputBuf.size)
                         }
                     }
                 } catch (e: Exception) {
@@ -549,6 +625,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("fastWaterfall", binding.fastWaterfallToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
+        editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
+        editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
         editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
         editor.putInt("deviceSelection", binding.deviceSpinner.selectedItemPosition)
         editor.apply()
@@ -562,6 +640,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val zoom = prefs.getBoolean("zoom", false)
         val fastWaterfall = prefs.getBoolean("fastWaterfall", false)
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
+        val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
+        val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
         val colorScale = prefs.getInt("colorScale", 0)
         val deviceSelection = prefs.getInt("deviceSelection", 0)
         
@@ -571,6 +651,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.zoomToggle.isChecked = zoom
         binding.fastWaterfallToggle.isChecked = fastWaterfall
         binding.showSpectrumToggle.isChecked = showSpectrum
+        binding.spectrumFilledToggle.isChecked = spectrumFilled
+        binding.spectrumConstantColorToggle.isChecked = spectrumConstantColor
         binding.colorScaleSpinner.setSelection(colorScale.coerceIn(0, binding.colorScaleSpinner.count - 1))
         
         // Set device selection if it's valid
@@ -583,6 +665,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun stopRecording() {
         isRecording.set(false)
+        stopVsyncRenderLoop()
         recordingThread?.join()
         stopOboeCapture()
         try {
@@ -602,6 +685,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val s = surface
         if (s != null) {
             setOboeSurface(s)
+            if (isRecording.get() && audioRecord != null) {
+                startVsyncRenderLoop()
+            }
         }
     }
 
@@ -611,15 +697,22 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val s = surface
         if (s != null) {
             setOboeSurface(s)
+            if (isRecording.get() && audioRecord != null) {
+                startVsyncRenderLoop()
+            }
         }
         setSurfaceSize(width, height)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surface = null
+        setOboeSurface(null)
+        stopVsyncRenderLoop()
     }
 
     private external fun processAndDraw(data: ShortArray, size: Int, surface: Surface)
+    private external fun processAudioData(data: ShortArray, size: Int)
+    private external fun renderFrame(surface: Surface)
     private external fun setSurfaceSize(width: Int, height: Int)
     private external fun setSensitivity(value: Int)
     private external fun setContrast(value: Int)
@@ -629,11 +722,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setFastWaterfall(enabled: Boolean)
     private external fun setShowSpectrum(enabled: Boolean)
     private external fun setColorScale(scale: Int)
+    private external fun setSpectrumFilled(filled: Boolean)
+    private external fun setSpectrumConstantColor(constant: Boolean)
 
     // Oboe native methods
     private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean
     private external fun stopOboeCapture()
-    private external fun setOboeSurface(surface: Surface)
+    private external fun setOboeSurface(surface: Surface?)
 
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean {
