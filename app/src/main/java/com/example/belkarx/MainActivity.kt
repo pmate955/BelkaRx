@@ -255,7 +255,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun setupColorScaleSpinner() {
-        val colorScales = arrayOf("Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot")
+        val colorScales = arrayOf(
+            "Classic Rainbow",
+            "Light Blue",
+            "Grayscale",
+            "Cool-Hot",
+            "Green Phosphor"
+        )
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, colorScales)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.colorScaleSpinner.adapter = adapter
@@ -420,32 +426,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
      * Aggressively reads and processes stereo audio with maximum buffer size
      */
     private fun processAudioViaAudioRecord(recorder: AudioRecord, minBufferSize: Int) {
-        Log.i("BelkaRx", "AudioRecord processing thread started (minBufferSize=$minBufferSize)")
+        Log.i("BelkaRx", "AudioRecord processing thread started (minBufferSize=$minBufferSize bytes)")
         
-        // Use aggressive buffer multiplier like the reference library (256x)
-        var bufferSize = minBufferSize
-        var buf: ShortArray? = null
-        var attempts = 0
-        
-        // Try to allocate the largest buffer possible (up to 256x minBufferSize)
-        while (buf == null && attempts < 9) {
-            try {
-                buf = ShortArray(bufferSize)
-                Log.i("BelkaRx", "AudioRecord buffer allocated: $bufferSize shorts (${bufferSize * 2} bytes)")
-            } catch (e: Exception) {
-                Log.w("BelkaRx", "Failed to allocate buffer of size $bufferSize: ${e.message}")
-                bufferSize /= 2
-                attempts++
-            }
-        }
-        
-        if (buf == null) {
-            Log.e("BelkaRx", "Could not allocate audio buffer")
-            return
-        }
-
-        val shortBuf = buf
         val fftSize = 2048
+        // Read in small chunks (~1 FFT window = 2048 stereo frames = 4096 shorts = 8192 bytes)
+        // minBufferSize is in bytes; convert to shorts and cap at one FFT window size
+        val readChunkShorts = fftSize * 2  // 4096 shorts per read
+        val shortBuf = ShortArray(readChunkShorts)
+        Log.i("BelkaRx", "AudioRecord read chunk: $readChunkShorts shorts (${readChunkShorts * 2} bytes)")
+
         val outputBuf = ShortArray(fftSize * 2)  // Stereo FFT buffer
         var outputIdx = 0
         var read: Int
@@ -582,7 +571,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.zoomToggle.isChecked = zoom
         binding.fastWaterfallToggle.isChecked = fastWaterfall
         binding.showSpectrumToggle.isChecked = showSpectrum
-        binding.colorScaleSpinner.setSelection(colorScale)
+        binding.colorScaleSpinner.setSelection(colorScale.coerceIn(0, binding.colorScaleSpinner.count - 1))
         
         // Set device selection if it's valid
         if (deviceSelection >= 0 && deviceSelection < binding.deviceSpinner.count) {

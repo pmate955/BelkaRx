@@ -25,7 +25,7 @@ bool swapIQEnabled = false;
 bool zoomEnabled = false;
 bool fastWaterfallEnabled = false;
 bool showSpectrumEnabled = false;
-int colorScale = 0;  // 0: Grayscale, 1: Black-Blue, 2: Blue-Green-Red
+int colorScale = 0;  // 0-3: existing scales, 4: Viridis, 5: Turbo, 6: Green Phosphor
 
 // Spectrum gain smoothing
 double smoothedMinMag = 110.0;
@@ -117,8 +117,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
     std::lock_guard<std::mutex> lock(g_mutex);
     colorScale = scale;
-    const char* scaleNames[] = {"Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot"};
-    if (scale >= 0 && scale < 4) {
+    const char* scaleNames[] = {
+        "Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot",
+        "Viridis", "Turbo", "Green Phosphor"
+    };
+    if (scale >= 0 && scale < 7) {
         LOGI("setColorScale: %d (%s)", scale, scaleNames[scale]);
     }
 }
@@ -256,6 +259,55 @@ static void applyGrayscaleScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_
     r = gray; g = gray; b = gray;
 }
 
+static uint8_t lerpChannel(uint8_t start, uint8_t end, double t) {
+    return static_cast<uint8_t>(start + (end - start) * t);
+}
+
+static void applyGradientScale(
+    int intensityInt,
+    uint8_t& r,
+    uint8_t& g,
+    uint8_t& b,
+    const double* positions,
+    const uint8_t colors[][3],
+    int stopCount) {
+    double norm = intensityInt / 255.0;
+    if (norm <= positions[0]) {
+        r = colors[0][0];
+        g = colors[0][1];
+        b = colors[0][2];
+        return;
+    }
+    if (norm >= positions[stopCount - 1]) {
+        r = colors[stopCount - 1][0];
+        g = colors[stopCount - 1][1];
+        b = colors[stopCount - 1][2];
+        return;
+    }
+
+    for (int i = 0; i < stopCount - 1; i++) {
+        if (norm <= positions[i + 1]) {
+            double localT = (norm - positions[i]) / (positions[i + 1] - positions[i]);
+            r = lerpChannel(colors[i][0], colors[i + 1][0], localT);
+            g = lerpChannel(colors[i][1], colors[i + 1][1], localT);
+            b = lerpChannel(colors[i][2], colors[i + 1][2], localT);
+            return;
+        }
+    }
+}
+
+static void applyGreenPhosphorScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
+    static const double positions[] = {0.0, 0.35, 0.65, 0.85, 1.0};
+    static const uint8_t colors[][3] = {
+        {6, 18, 6},
+        {18, 78, 18},
+        {32, 190, 32},
+        {140, 255, 140},
+        {228, 255, 196}
+    };
+    applyGradientScale(intensityInt, r, g, b, positions, colors, 5);
+}
+
 static void applyCoolHotScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
     double norm = intensityInt / 255.0;
     if (norm < 0.25) {
@@ -308,8 +360,10 @@ uint32_t getColor(double intensity) {
         applyLightBlueScale(intensityInt, r, g, b);
     } else if (colorScale == 2) {
         applyGrayscaleScale(intensityInt, r, g, b);
-    } else {  // colorScale == 3
+    } else if (colorScale == 3) {
         applyCoolHotScale(intensityInt, r, g, b);
+    } else {
+        applyGreenPhosphorScale(intensityInt, r, g, b);
     }
     
     return 0xFF000000 | (b << 16) | (g << 8) | r;
@@ -679,7 +733,7 @@ static bool setupAudioEnvironment(AudioThreadEnv& audio) {
     }
 
     const int32_t fftSize = 2048;
-    audio.buffer = new int16_t[fftSize * 2];
+    audio.buffer = new int16_t[fftSize * 2 * 4]; // 4x oversized for burst reads
 
     jclass mainActivityClass = audio.env->GetObjectClass(g_mainActivityRef);
     if (mainActivityClass == nullptr) {
@@ -712,29 +766,48 @@ void audioReadingThread() {
     if (!setupAudioEnvironment(audio)) return;
 
     const int32_t fftSize = 2048;
-    const int32_t framesPerRead = fftSize;
+    // Accumulator: collects burst-sized reads until we have a full fftSize frame
+    std::vector<int16_t> accumulator;
+    accumulator.reserve(fftSize * 2);
 
     while (g_isCapturing && g_audioCapture != nullptr) {
-        int32_t framesRead = g_audioCapture->readFrames(audio.buffer, framesPerRead);
+        // Read up to fftSize frames in one call (may return fewer in LOW_LATENCY mode)
+        int32_t framesRead = g_audioCapture->readFrames(audio.buffer, fftSize);
         if (framesRead < 0) {
             LOGI("AAudio read error");
             break;
         }
         if (framesRead == 0) {
-            usleep(1000);
+            usleep(10);
             continue;
         }
 
-        jshortArray javaBuffer = audio.env->NewShortArray(framesRead * 2);
-        if (javaBuffer == nullptr) {
-            LOGI("ERROR: Failed to create short array for framesRead=%d", framesRead * 2);
+        // Append new samples to accumulator (stereo: 2 shorts per frame)
+        int32_t newSamples = framesRead * 2;
+        accumulator.insert(accumulator.end(), audio.buffer, audio.buffer + newSamples);
+
+        // Only process once we have a full FFT window
+        if ((int32_t)accumulator.size() < fftSize * 2) {
             continue;
         }
-        audio.env->SetShortArrayRegion(javaBuffer, 0, framesRead * 2, audio.buffer);
+
+        jshortArray javaBuffer = audio.env->NewShortArray(fftSize * 2);
+        if (javaBuffer == nullptr) {
+            LOGI("ERROR: Failed to create short array");
+            accumulator.clear();
+            continue;
+        }
+        audio.env->SetShortArrayRegion(javaBuffer, 0, fftSize * 2, accumulator.data());
+
+        // Keep any excess samples for the next frame (sliding window)
+        if ((int32_t)accumulator.size() > fftSize * 2) {
+            accumulator.erase(accumulator.begin(), accumulator.begin() + fftSize * 2);
+        } else {
+            accumulator.clear();
+        }
 
         jobject surface = g_surfaceRef;
-
-        audio.env->CallVoidMethod(g_mainActivityRef, audio.processAndDrawMethod, javaBuffer, framesRead * 2, surface);
+        audio.env->CallVoidMethod(g_mainActivityRef, audio.processAndDrawMethod, javaBuffer, fftSize * 2, surface);
 
         if (audio.env->ExceptionCheck()) {
             LOGI("ERROR: Exception in CallVoidMethod");
