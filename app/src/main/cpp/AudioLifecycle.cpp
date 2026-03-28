@@ -120,7 +120,7 @@ void audioReadingThread() {
             continue;
         }
 
-        Java_com_example_belkarx_MainActivity_processAndDraw(audio.env, nullptr, audio.frameArray, fftSize * 2, surface);
+        Java_hu_ha8mz_belkarx_MainActivity_processAndDraw(audio.env, nullptr, audio.frameArray, fftSize * 2, surface);
     }
 
     cleanupAudioEnvironment(audio);

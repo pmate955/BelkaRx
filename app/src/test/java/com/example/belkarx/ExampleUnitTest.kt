@@ -1,4 +1,4 @@
-package com.example.belkarx
+package hu.ha8mz.belkarx
 
 import org.junit.Test
 

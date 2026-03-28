@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.belkarx"
+    namespace = "hu.ha8mz.belkarx"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -11,7 +11,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.belkarx"
+        applicationId = "hu.ha8mz.belkarx"
         minSdk = 31
         targetSdk = 36
         versionCode = 1

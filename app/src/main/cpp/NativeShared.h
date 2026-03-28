@@ -20,4 +20,4 @@ extern std::thread* g_audioThread;
 extern bool g_isCapturing;
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject thiz, jshortArray data, jint size, jobject surface);
+Java_hu_ha8mz_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject thiz, jshortArray data, jint size, jobject surface);

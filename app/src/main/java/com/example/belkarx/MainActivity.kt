@@ -1,4 +1,4 @@
-package com.example.belkarx
+package hu.ha8mz.belkarx
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -27,7 +27,7 @@ import android.widget.SeekBar
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import com.example.belkarx.databinding.ActivityMainBinding
+import hu.ha8mz.belkarx.databinding.ActivityMainBinding
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {

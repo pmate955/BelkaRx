@@ -169,7 +169,7 @@ void fft(std::vector<float>& real, std::vector<float>& imag) {
 
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setSurfaceSize(JNIEnv* env, jobject /* this */, jint width, jint height) {
+Java_hu_ha8mz_belkarx_MainActivity_setSurfaceSize(JNIEnv* env, jobject /* this */, jint width, jint height) {
     std::lock_guard<std::mutex> lock(g_mutex);
     surfaceWidth = width;
     surfaceHeight = height;
@@ -180,41 +180,41 @@ Java_com_example_belkarx_MainActivity_setSurfaceSize(JNIEnv* env, jobject /* thi
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setSensitivity(JNIEnv* env, jobject /* this */, jint value) {
+Java_hu_ha8mz_belkarx_MainActivity_setSensitivity(JNIEnv* env, jobject /* this */, jint value) {
     std::lock_guard<std::mutex> lock(g_mutex);
     sensitivityValue = value;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setContrast(JNIEnv* env, jobject /* this */, jint value) {
+Java_hu_ha8mz_belkarx_MainActivity_setContrast(JNIEnv* env, jobject /* this */, jint value) {
     std::lock_guard<std::mutex> lock(g_mutex);
     contrastValue = value;
     LOGI("setContrast: %d", value);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
+Java_hu_ha8mz_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
     LOGI("setZoom: %s", zoomEnabled ? "true (centered @+8kHz)" : "false (±24kHz @DC)");
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setFastWaterfall(JNIEnv* env, jobject /* this */, jboolean enabled) {
+Java_hu_ha8mz_belkarx_MainActivity_setFastWaterfall(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     fastWaterfallEnabled = (enabled == JNI_TRUE);
     LOGI("setFastWaterfall: %s", fastWaterfallEnabled ? "true" : "false");
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setShowSpectrum(JNIEnv* env, jobject /* this */, jboolean enabled) {
+Java_hu_ha8mz_belkarx_MainActivity_setShowSpectrum(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     showSpectrumEnabled = (enabled == JNI_TRUE);
     LOGI("setShowSpectrum: %s", showSpectrumEnabled ? "true" : "false");
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
+Java_hu_ha8mz_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
     std::lock_guard<std::mutex> lock(g_mutex);
     colorScale = scale;
     const char* scaleNames[] = {
@@ -226,27 +226,27 @@ Java_com_example_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setSpectrumFilled(JNIEnv* env, jobject /* this */, jboolean filled) {
+Java_hu_ha8mz_belkarx_MainActivity_setSpectrumFilled(JNIEnv* env, jobject /* this */, jboolean filled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     isSpectrumFilled = (filled == JNI_TRUE);
     LOGI("setSpectrumFilled: %s", isSpectrumFilled ? "true (filled bars)" : "false (lines)");
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setSpectrumConstantColor(JNIEnv* env, jobject /* this */, jboolean constant) {
+Java_hu_ha8mz_belkarx_MainActivity_setSpectrumConstantColor(JNIEnv* env, jobject /* this */, jboolean constant) {
     std::lock_guard<std::mutex> lock(g_mutex);
     isSpectrumConstantColor = (constant == JNI_TRUE);
     LOGI("setSpectrumConstantColor: %s", isSpectrumConstantColor ? "true (constant color)" : "false (dynamic color)");
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setNativeSampleRate(JNIEnv* env, jobject /* this */, jint rate) {
+Java_hu_ha8mz_belkarx_MainActivity_setNativeSampleRate(JNIEnv* env, jobject /* this */, jint rate) {
     std::lock_guard<std::mutex> lock(g_mutex);
     currentSampleRate = rate;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */, jboolean swap) {
+Java_hu_ha8mz_belkarx_MainActivity_setSwapIQ(JNIEnv* env, jobject /* this */, jboolean swap) {
     std::lock_guard<std::mutex> lock(g_mutex);
     swapIQEnabled = swap;
     LOGI("setSwapIQ: %d", (int)swap);
@@ -332,7 +332,7 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, 
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* this */, jshortArray data, jint size, jobject surface) {
+Java_hu_ha8mz_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* this */, jshortArray data, jint size, jobject surface) {
     if (surface == nullptr && g_nativeWindow == nullptr) return;
 
     using Clock = std::chrono::steady_clock;
@@ -568,7 +568,7 @@ Java_com_example_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* thi
 // thread is never blocked by ANativeWindow_lock waiting for a vsync buffer.
 // ============================================================================
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshortArray data, jint size) {
+Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshortArray data, jint size) {
     using Clock = std::chrono::steady_clock;
     auto frameStart = Clock::now();
     int64_t unpackNs = 0, fftNs = 0, magPassNs = 0, waterfallUpdateNs = 0;
@@ -675,7 +675,7 @@ Java_com_example_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jsh
 // thread and causing stutter.
 // ============================================================================
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject surface) {
+Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject surface) {
     using Clock = std::chrono::steady_clock;
     auto blitStart = Clock::now();
 
@@ -762,16 +762,16 @@ Java_com_example_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject 
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_example_belkarx_MainActivity_startOboeCapture(JNIEnv* env, jobject thisObj, jint deviceId, jint sampleRate) {
+Java_hu_ha8mz_belkarx_MainActivity_startOboeCapture(JNIEnv* env, jobject thisObj, jint deviceId, jint sampleRate) {
     return startOboeCaptureImpl(env, thisObj, deviceId, sampleRate) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_stopOboeCapture(JNIEnv* env, jobject /* this */) {
+Java_hu_ha8mz_belkarx_MainActivity_stopOboeCapture(JNIEnv* env, jobject /* this */) {
     stopOboeCaptureImpl(env);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_belkarx_MainActivity_setOboeSurface(JNIEnv* env, jobject /* this */, jobject surface) {
+Java_hu_ha8mz_belkarx_MainActivity_setOboeSurface(JNIEnv* env, jobject /* this */, jobject surface) {
     setOboeSurfaceImpl(env, surface);
 }
