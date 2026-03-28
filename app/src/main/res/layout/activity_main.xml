@@ -94,28 +94,28 @@
                 android:id="@+id/zoomToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="4dp"
                 android:checked="false"
                 android:textOff="Zoom"
                 android:textOn="Zoom" />
 
             <ToggleButton
-                android:id="@+id/showSpectrumToggle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:checked="false"
-                android:textOff="Spectrum"
-                android:textOn="Spectrum" />
-
-            <ToggleButton
                 android:id="@+id/fastWaterfallToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="4dp"
                 android:checked="false"
                 android:textOff="Fast"
                 android:textOn="Fast" />
+
+            <ToggleButton
+                android:id="@+id/showSpectrumToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:checked="false"
+                android:textOff="Spectrum"
+                android:textOn="Spectrum" />
 
         </LinearLayout>
 
@@ -141,10 +141,10 @@
                 android:id="@+id/spectrumConstantColorToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="4dp"
                 android:checked="false"
-                android:textOff="Const Color"
-                android:textOn="Const Color" />
+                android:textOff="Monochrome"
+                android:textOn="Monochrome" />
 
         </LinearLayout>
 

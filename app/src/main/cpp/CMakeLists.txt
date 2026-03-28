@@ -3,7 +3,11 @@ cmake_minimum_required(VERSION 3.22.1)
 project("belkarx")
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
-    native-lib.cpp)
+    native-lib.cpp
+    AudioLifecycle.cpp
+    ColorScales.cpp
+    DspHelpers.cpp
+    RenderHelpers.cpp)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
     android
