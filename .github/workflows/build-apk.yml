@@ -1,4 +1,4 @@
-name: Build APK
+name: Build Android Artifacts
 
 on:
   push:
@@ -35,9 +35,9 @@ jobs:
           mkdir -p app/keystore
           echo "${{ secrets.KEYSTORE_FILE }}" | base64 -d > app/keystore/release.keystore
 
-      - name: Build signed release APK
+      - name: Build signed release APK and App Bundle
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease bundleRelease
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -47,13 +47,14 @@ jobs:
         if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
         run: ./gradlew assembleDebug
 
-      - name: Rename release APK with version info
+      - name: Rename release APK and AAB with version info
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           BUILD_NUM=${{ github.run_number }}
           COMMIT_SHA=${{ github.sha }}
           SHORT_SHA=${COMMIT_SHA:0:7}
           mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/BelkaRx-${{ github.ref_name }}-signed.apk
+          mv app/build/outputs/bundle/release/app-release.aab app/build/outputs/bundle/release/BelkaRx-${{ github.ref_name }}-signed.aab
 
       - name: Rename debug APK with version info
         if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
@@ -70,8 +71,16 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: BelkaRx-Release-${{ github.ref_name }}
+          name: BelkaRx-Release-APK-${{ github.ref_name }}
           path: app/build/outputs/apk/release/BelkaRx-*.apk
+          retention-days: 90
+
+      - name: Upload release AAB artifact
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: BelkaRx-Release-AAB-${{ github.ref_name }}
+          path: app/build/outputs/bundle/release/BelkaRx-*.aab
           retention-days: 90
 
       - name: Upload debug APK artifact
@@ -93,8 +102,10 @@ jobs:
             Commit: ${{ github.sha }}
             Branch/Tag: ${{ github.ref }}
             
-            ✅ APK is signed and ready for Google Play publication
-          files: app/build/outputs/apk/release/BelkaRx-*.apk
+            ✅ Signed APK and AAB are attached
+          files: |
+            app/build/outputs/apk/release/BelkaRx-*.apk
+            app/build/outputs/bundle/release/BelkaRx-*.aab
           draft: false
           prerelease: false
           generate_release_notes: true
