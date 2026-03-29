@@ -119,9 +119,9 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
 
 int computeMarkerX(int width, bool zoom) {
     if (zoom) {
-        return static_cast<int>(std::lround(width / 2.325));
+        return static_cast<int>(std::lround(width / 2.35));
     }
-    return static_cast<int>(std::lround((width * 7) / 11.05));
+    return static_cast<int>(std::lround((width * 7) / 11.06));
 }
 
 }  // namespace

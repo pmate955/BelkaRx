@@ -30,6 +30,8 @@ bool drawSpectrumFrame(
         return false;
     }
 
+    int effectiveSensitivity = static_cast<int>(params.sensitivity * 0.75);
+
     if ((int)decayBuffer.size() != params.surfaceWidth) {
         decayBuffer.assign(params.surfaceWidth, -1000.0);
     }
@@ -43,7 +45,7 @@ bool drawSpectrumFrame(
         }
     }
 
-    double refLevel = 250.0 - params.sensitivity;
+    double refLevel = 250.0 - effectiveSensitivity;
     double displayRange = 160.0 - (params.contrast / 300.0) * 140.0;
     double minLevel = refLevel - displayRange;
     double invDisplayRange = 1.0 / displayRange;
@@ -76,7 +78,7 @@ bool drawSpectrumFrame(
 
         uint32_t traceColor = getColorWithParams(
             colorNormalized * 255.0,
-            params.sensitivity,
+            effectiveSensitivity,
             params.contrast,
             params.colorScale);
 
