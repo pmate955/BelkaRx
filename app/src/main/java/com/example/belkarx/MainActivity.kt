@@ -156,6 +156,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Fast waterfall checkbox changed: $isChecked")
         }
 
+        binding.robustScaleToggle.setOnCheckedChangeListener { _, isChecked ->
+            setRobustScaleStrength(if (isChecked) 25 else 0)
+            saveSettings()
+            Log.d("BelkaRx", "Robust toggle changed: $isChecked")
+        }
+
         binding.showSpectrumToggle.setOnCheckedChangeListener { _, isChecked ->
             setShowSpectrum(isChecked)
             updateSpectrumOptionControlsEnabled(isChecked)
@@ -192,6 +198,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setSwapIQ(binding.swapIQToggle.isChecked)
         setZoom(binding.zoomToggle.isChecked)
         setFastWaterfall(binding.fastWaterfallToggle.isChecked)
+        setRobustScaleStrength(if (binding.robustScaleToggle.isChecked) 25 else 0)
         setShowSpectrum(binding.showSpectrumToggle.isChecked)
         setSpectrumFilled(binding.spectrumFilledToggle.isChecked)
         setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
@@ -241,6 +248,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.spinnerContainer,
             binding.sensitivityView,
             binding.contrastView,
+            binding.showSpectrumToggle,
             binding.spectrumOptionsContainer
         )
         for (v in viewsToMove) {
@@ -281,10 +289,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.spinnerContainer.layoutParams = getDropParams()
             dropdownContainer.addView(binding.spinnerContainer)
 
+            binding.showSpectrumToggle.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(4, 0, 0, 0)
+            }
+            mainToggleContainer.addView(binding.showSpectrumToggle)
+
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsInlineParams()
             mainToggleContainer.addView(binding.spectrumOptionsContainer)
         } else {
-            // In Portrait: keep spectrum option toggles on their own row.
+            // In Portrait: place Spectrum on the same row with Filled and Monochrome.
             binding.sensitivityView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
             
@@ -292,6 +308,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.contrastView.layoutParams = getDropParams()
             dropdownContainer.addView(binding.spinnerContainer)
             dropdownContainer.addView(binding.contrastView)
+
+            binding.showSpectrumToggle.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            binding.spectrumOptionsContainer.addView(binding.showSpectrumToggle, 0)
 
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsParams()
             controlsContainer.addView(binding.spectrumOptionsContainer)
@@ -302,7 +324,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
         
-        // Show all input devices (native Oboe/AAudio will request unprocessed audio)
+        // Show all input devices (AudioRecord UNPROCESSED path is used for capture)
         val deviceNames = devices.map { device ->
             val type = when (device.type) {
                 AudioDeviceInfo.TYPE_USB_DEVICE -> "USB Device"
@@ -370,20 +392,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.statusText.text = "Status: Starting AudioRecord UNPROCESSED capture..."
         
-        // Try AudioRecord with UNPROCESSED source first
         try {
             if (!tryAudioRecordUnprocessed(selectedDevice)) {
                 binding.statusText.text = "Status: Error - Failed to start AudioRecord UNPROCESSED"
                 Log.e("BelkaRx", "Failed to start AudioRecord UNPROCESSED for device ${selectedDevice.id}")
-                
-                // Fallback to Oboe
-                Log.i("BelkaRx", "Trying Oboe as fallback")
-                val sampleRate = 192000
-                setNativeSampleRate(sampleRate)
-                val success = startOboeCapture(selectedDevice.id, sampleRate)
-                if (!success) {
-                    binding.statusText.text = "Status: Error - No audio source available"
-                }
                 return
             }
         } catch (e: Exception) {
@@ -585,7 +597,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             outputIdx = 0
                             processCount++
                             if (processCount % 10 == 0) {
-                                Log.d("BelkaRx", "Calling processAndDraw (count=$processCount, bufSize=${fftSize*2}, stereo=$stereoCount, mono=$monoCount)")
+                                Log.d("BelkaRx", "Calling processAudioData (count=$processCount, bufSize=${fftSize*2}, stereo=$stereoCount, mono=$monoCount)")
                             }
 
                             processAudioData(outputBuf, outputBuf.size)
@@ -626,6 +638,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("swapIQ", binding.swapIQToggle.isChecked)
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("fastWaterfall", binding.fastWaterfallToggle.isChecked)
+        editor.putBoolean("robustScaleEnabled", binding.robustScaleToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
@@ -641,6 +654,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val swapIQ = prefs.getBoolean("swapIQ", false)
         val zoom = prefs.getBoolean("zoom", false)
         val fastWaterfall = prefs.getBoolean("fastWaterfall", false)
+        val robustScaleEnabled = prefs.getBoolean("robustScaleEnabled", false)
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
@@ -652,6 +666,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.swapIQToggle.isChecked = swapIQ
         binding.zoomToggle.isChecked = zoom
         binding.fastWaterfallToggle.isChecked = fastWaterfall
+        binding.robustScaleToggle.isChecked = robustScaleEnabled
         binding.showSpectrumToggle.isChecked = showSpectrum
         binding.spectrumFilledToggle.isChecked = spectrumFilled
         binding.spectrumConstantColorToggle.isChecked = spectrumConstantColor
@@ -662,14 +677,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.deviceSpinner.setSelection(deviceSelection)
         }
         
-        Log.d("BelkaRx", "Settings loaded: sensitivity=$sensitivity, contrast=$contrast, swapIQ=$swapIQ, zoom=$zoom, colorScale=$colorScale")
+        Log.d("BelkaRx", "Settings loaded: sensitivity=$sensitivity, contrast=$contrast, swapIQ=$swapIQ, zoom=$zoom, robustScaleEnabled=$robustScaleEnabled, colorScale=$colorScale")
     }
 
     private fun stopRecording() {
         isRecording.set(false)
         stopVsyncRenderLoop()
         recordingThread?.join()
-        stopOboeCapture()
         try {
             audioRecord?.stop()
         } catch (e: Exception) {}
@@ -683,10 +697,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     override fun surfaceCreated(holder: SurfaceHolder) {
         holder.setFormat(PixelFormat.RGBA_8888)
         surface = holder.surface
-        // Pass surface to native code for Oboe rendering
+        // Pass surface to native renderer.
         val s = surface
         if (s != null) {
-            setOboeSurface(s)
+            setNativeSurface(s)
             if (isRecording.get() && audioRecord != null) {
                 startVsyncRenderLoop()
             }
@@ -695,10 +709,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         surface = holder.surface
-        // Update surface reference in native code
         val s = surface
         if (s != null) {
-            setOboeSurface(s)
+            setNativeSurface(s)
             if (isRecording.get() && audioRecord != null) {
                 startVsyncRenderLoop()
             }
@@ -708,11 +721,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surface = null
-        setOboeSurface(null)
+        setNativeSurface(null)
         stopVsyncRenderLoop()
     }
 
-    private external fun processAndDraw(data: ShortArray, size: Int, surface: Surface)
     private external fun processAudioData(data: ShortArray, size: Int)
     private external fun renderFrame(surface: Surface)
     private external fun setSurfaceSize(width: Int, height: Int)
@@ -722,15 +734,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setSwapIQ(swap: Boolean)
     private external fun setZoom(enabled: Boolean)
     private external fun setFastWaterfall(enabled: Boolean)
+    private external fun setRobustScaleStrength(strength: Int)
     private external fun setShowSpectrum(enabled: Boolean)
     private external fun setColorScale(scale: Int)
     private external fun setSpectrumFilled(filled: Boolean)
     private external fun setSpectrumConstantColor(constant: Boolean)
-
-    // Oboe native methods
-    private external fun startOboeCapture(deviceId: Int, sampleRate: Int): Boolean
-    private external fun stopOboeCapture()
-    private external fun setOboeSurface(surface: Surface?)
+    private external fun setNativeSurface(surface: Surface?)
 
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean {

@@ -7,7 +7,7 @@ The IQ (or line) output of the Belka SDR radio must be connected to the phone vi
 
 ## Features and Capabilities
 
-The program provides real-time, low-latency display thanks to fast C++ based signal processing (JNI and Oboe API).
+The program provides real-time, low-latency display thanks to fast C++ based signal processing (JNI + native renderer).
 
 * **Spectrum and Waterfall View:** Visually see the signals in the band, which greatly helps with tuning and finding weak signals.
 * **Swap I/Q Channels:** In case the left/right channels of the USB sound card are swapped (resulting in a mirrored spectrum), this can be corrected with a single button press.
@@ -24,7 +24,7 @@ The program provides real-time, low-latency display thanks to fast C++ based sig
 
 * Built with: Android Studio, Kotlin / Java
 * Native Processing (C/C++): Used for FFT (Fast Fourier Transform) calculations and efficient, rapid rendering of pixels (waterfall).
-* Audio Capture: Google Oboe library for low-latency audio processing.
+* Audio Capture: Android AudioRecord (UNPROCESSED) with native DSP pipeline.
 * Supported Sample Rates: Up to 96 kHz (hardware dependent).
 
 ## Usage

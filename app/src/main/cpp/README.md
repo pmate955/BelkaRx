@@ -1,13 +1,11 @@
 # Native DSP/Render Notes
 
 ## Files
-- `native-lib.cpp`: JNI entrypoints, FFT pipeline orchestration, waterfall/spectrum frame production, Oboe lifecycle.
+- `native-lib.cpp`: JNI entrypoints, FFT pipeline orchestration, waterfall/spectrum frame production, and native surface lifecycle.
 - `NativeShared.h`: Shared native globals and cross-module JNI declarations.
-- `AudioLifecycle.h/.cpp`: Oboe startup/shutdown, surface ownership, and audio reading thread lifecycle.
 - `ColorScales.h/.cpp`: Color mapping and LUT construction for all supported scales.
 - `DspHelpers.h/.cpp`: Shared DSP utilities for IQ unpacking, span selection, and per-pixel magnitude generation.
 - `RenderHelpers.h/.cpp`: Shared frame rasterization for spectrum and waterfall blit paths.
-- `OboeCapture.h`: Audio device capture wrapper.
 
 ## Runtime flow
 1. Kotlin feeds IQ audio blocks into `processAudioData(...)`.

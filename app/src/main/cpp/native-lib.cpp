@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <atomic>
@@ -11,9 +12,7 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <android/log.h>
-#include "OboeCapture.h"
 #include "NativeShared.h"
-#include "AudioLifecycle.h"
 #include "ColorScales.h"
 #include "DspHelpers.h"
 #include "RenderHelpers.h"
@@ -37,6 +36,7 @@ int currentSampleRate = 96000;
 bool swapIQEnabled = false;
 bool zoomEnabled = false;
 bool fastWaterfallEnabled = false;
+int robustScaleStrength = 0;  // 0 = legacy min/max scaling, 100 = strongest robust scaling
 bool showSpectrumEnabled = false;
 bool isSpectrumFilled = false;  // true: filled bars, false: lines (default)
 bool isSpectrumConstantColor = false;  // true: use constant middle color, false: use dynamic color (default)
@@ -46,15 +46,6 @@ int colorScale = 0;  // 0: Rainbow, 1: Light Blue, 2: Grayscale, 3: Cool-Hot, 4:
 double smoothedMinMag = 110.0;
 double smoothedMaxMag = 170.0;
 
-// Oboe capture state
-OboeCapture* g_audioCapture = nullptr;
-std::thread* g_audioThread = nullptr;
-bool g_isCapturing = false;
-
-// Global reference for calling back to Java processAndDraw
-JavaVM* g_vm = nullptr;
-jobject g_mainActivityRef = nullptr;
-jobject g_surfaceRef = nullptr;
 ANativeWindow* g_nativeWindow = nullptr;
 
 namespace {
@@ -103,6 +94,60 @@ void updateSmoothedMagnitudeRange(double minMag, double maxMag, bool showSpectru
     smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
 }
 
+void computeRobustMagnitudeRange(const std::vector<double>& lineMags, int robustStrength, double& outMinMag, double& outMaxMag) {
+    if (robustStrength <= 0) {
+        outMinMag = 1e9;
+        outMaxMag = -1e9;
+        for (double value : lineMags) {
+            if (value < outMinMag) outMinMag = value;
+            if (value > outMaxMag) outMaxMag = value;
+        }
+        return;
+    }
+
+    double strengthNorm = static_cast<double>(robustStrength) / 100.0;
+    double lowPercentile = 0.00 + strengthNorm * 0.02;    // 0.0% -> 2.0%
+    double highPercentile = 1.00 - strengthNorm * 0.02;   // 100.0% -> 98.0%
+
+    size_t sampleCount = lineMags.size();
+    if (sampleCount < 8) {
+        outMinMag = 1e9;
+        outMaxMag = -1e9;
+        for (double value : lineMags) {
+            if (value < outMinMag) outMinMag = value;
+            if (value > outMaxMag) outMaxMag = value;
+        }
+        return;
+    }
+
+    static thread_local std::vector<double> sortedScratch;
+    sortedScratch = lineMags;
+
+    size_t lowIndex = static_cast<size_t>(lowPercentile * (sampleCount - 1));
+    size_t highIndex = static_cast<size_t>(highPercentile * (sampleCount - 1));
+    if (highIndex <= lowIndex) {
+        highIndex = lowIndex + 1;
+    }
+    if (highIndex >= sampleCount) {
+        highIndex = sampleCount - 1;
+    }
+
+    std::nth_element(sortedScratch.begin(), sortedScratch.begin() + lowIndex, sortedScratch.end());
+    outMinMag = sortedScratch[lowIndex];
+
+    std::nth_element(sortedScratch.begin(), sortedScratch.begin() + highIndex, sortedScratch.end());
+    outMaxMag = sortedScratch[highIndex];
+
+    if (outMaxMag <= outMinMag + 1e-6) {
+        outMinMag = sortedScratch.front();
+        outMaxMag = sortedScratch.front() + 1.0;
+        for (double value : sortedScratch) {
+            if (value < outMinMag) outMinMag = value;
+            if (value > outMaxMag) outMaxMag = value;
+        }
+    }
+}
+
 RenderConfigSnapshot snapshotRenderConfigLocked() {
     return {
         sensitivityValue,
@@ -122,6 +167,17 @@ int computeMarkerX(int width, bool zoom) {
         return static_cast<int>(std::lround(width / 2.35));
     }
     return static_cast<int>(std::lround((width * 7) / 11.06));
+}
+
+void setNativeSurfaceLocked(JNIEnv* env, jobject surface) {
+    if (g_nativeWindow != nullptr) {
+        ANativeWindow_release(g_nativeWindow);
+        g_nativeWindow = nullptr;
+    }
+
+    if (surface != nullptr) {
+        g_nativeWindow = ANativeWindow_fromSurface(env, surface);
+    }
 }
 
 }  // namespace
@@ -204,6 +260,15 @@ Java_hu_ha8mz_belkarx_MainActivity_setFastWaterfall(JNIEnv* env, jobject /* this
     std::lock_guard<std::mutex> lock(g_mutex);
     fastWaterfallEnabled = (enabled == JNI_TRUE);
     LOGI("setFastWaterfall: %s", fastWaterfallEnabled ? "true" : "false");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setRobustScaleStrength(JNIEnv* env, jobject /* this */, jint strength) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (strength < 0) strength = 0;
+    if (strength > 100) strength = 100;
+    robustScaleStrength = strength;
+    LOGI("setRobustScaleStrength: %d", robustScaleStrength);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -331,237 +396,6 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, 
     drawFrequencyGridLines(dest, stride, width, height, markerPixelX, markerPixelY, Hz_per_pixel);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_processAndDraw(JNIEnv* env, jobject /* this */, jshortArray data, jint size, jobject surface) {
-    if (surface == nullptr && g_nativeWindow == nullptr) return;
-
-    using Clock = std::chrono::steady_clock;
-    auto frameStart = Clock::now();
-    int64_t unpackNs = 0;
-    int64_t fftNs = 0;
-    int64_t magPassNs = 0;
-    int64_t waterfallUpdateNs = 0;
-    int64_t windowBlitNs = 0;
-
-    jshort* buffer = env->GetShortArrayElements(data, nullptr);
-    if (buffer == nullptr) return;
-    
-    static bool loggedRate = false;
-    if (!loggedRate) {
-        loggedRate = true;
-        LOGI("processAndDraw first call: currentSampleRate=%d, size=%d", currentSampleRate, size);
-    }
-
-    int fftSize = 4096;  // Larger FFT for better frequency resolution
-    if (size < 2 * fftSize) {
-        env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
-        return;
-    }
-
-    // Use thread_local to avoid memory allocation on every frame
-    thread_local std::vector<float> real;
-    thread_local std::vector<float> imag;
-    if (real.size() != fftSize) {
-        real.resize(fftSize);
-        imag.resize(fftSize);
-    }
-
-    {
-        auto t0 = Clock::now();
-        std::lock_guard<std::mutex> lock(g_mutex);
-        unpackIqSamples(buffer, fftSize, swapIQEnabled, real, imag);
-        auto t1 = Clock::now();
-        unpackNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-    }
-    env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
-
-    auto fftStart = Clock::now();
-    fft(real, imag);
-    auto fftEnd = Clock::now();
-    fftNs += std::chrono::duration_cast<std::chrono::nanoseconds>(fftEnd - fftStart).count();
-    
-    std::lock_guard<std::mutex> lock(g_mutex);
-    RenderConfigSnapshot config = snapshotRenderConfigLocked();
-    int TOP_MARGIN = kTopMargin;
-    int waterfallRows = getWaterfallRows(surfaceHeight);
-
-    if (!hasValidWaterfallBufferLocked(waterfallRows)) {
-        return;
-    }
-
-    int shiftRows = getShiftRows(config.fastWaterfall);
-
-    if (!config.showSpectrum && waterfallRows > 0) {
-        auto t0 = Clock::now();
-        advanceWaterfallHeadLocked(waterfallRows, shiftRows);
-        auto t1 = Clock::now();
-        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-    }
-
-    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom);
-    double minMag = 1e9, maxMag = -1e9;
-    
-    // First pass: calculate min/max for current frame
-    // Use thread_local to avoid memory allocation every frame
-    thread_local std::vector<double> lineMagnitudes;
-    if (lineMagnitudes.size() != surfaceWidth) {
-        lineMagnitudes.resize(surfaceWidth);
-    }
-    
-    auto magStart = Clock::now();
-    computeLineMagnitudes(real, imag, fftSize, surfaceWidth, config.zoom, span, lineMagnitudes, minMag, maxMag);
-    auto magEnd = Clock::now();
-    magPassNs += std::chrono::duration_cast<std::chrono::nanoseconds>(magEnd - magStart).count();
-    
-    updateSmoothedMagnitudeRange(minMag, maxMag, config.showSpectrum);
-    
-    // Second pass: draw with normalized intensity using smoothed min/max
-    if (!config.showSpectrum && waterfallRows > 0) {
-        auto t0 = Clock::now();
-        thread_local std::array<uint32_t, 256> colorLut;
-        thread_local int lutSensitivity = -1;
-        thread_local int lutContrast = -1;
-        thread_local int lutScale = -1;
-
-        if (lutSensitivity != config.sensitivity || lutContrast != config.contrast || lutScale != config.colorScaleValue) {
-            buildColorLut(config.sensitivity, config.contrast, config.colorScaleValue, colorLut);
-            lutSensitivity = config.sensitivity;
-            lutContrast = config.contrast;
-            lutScale = config.colorScaleValue;
-        }
-
-        double range = smoothedMaxMag - smoothedMinMag + 1e-6;  // Avoid division by zero
-        double invRange = 255.0 / range;
-        
-        // Fill the newest ring-buffer row sequentially
-        uint32_t* firstRowBuffer = &waterfallBuffer[waterfallHeadRow * surfaceWidth];
-        for (int x = 0; x < surfaceWidth; x++) {
-            double logMag = lineMagnitudes[x];
-            
-            // Normalize intensity to 0-255 based on smoothed min/max
-            double normalizedIntensity = (logMag - smoothedMinMag) * invRange;
-            // Fast clamp
-            normalizedIntensity = normalizedIntensity < 0.0 ? 0.0 : (normalizedIntensity > 255.0 ? 255.0 : normalizedIntensity);
-
-            firstRowBuffer[x] = colorLut[static_cast<int>(normalizedIntensity)];
-        }
-        
-        // Duplicate newest rows for fast waterfall mode.
-        int duplicateRows = shiftRows < waterfallRows ? shiftRows : waterfallRows;
-        for (int r = 1; r < duplicateRows; r++) {
-            int physicalRow = waterfallHeadRow + r;
-            if (physicalRow >= waterfallRows) {
-                physicalRow -= waterfallRows;
-            }
-            memcpy(&waterfallBuffer[physicalRow * surfaceWidth], firstRowBuffer, surfaceWidth * sizeof(uint32_t));
-        }
-        auto t1 = Clock::now();
-        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-    }
-   
-    auto blitStart = Clock::now();
-    ANativeWindow* window = g_nativeWindow;
-    bool temporaryWindow = false;
-    if (window == nullptr && surface != nullptr) {
-        window = ANativeWindow_fromSurface(env, surface);
-        temporaryWindow = (window != nullptr);
-    }
-    if (window) {
-        ANativeWindow_Buffer buffer_out;
-        if (ANativeWindow_lock(window, &buffer_out, nullptr) == 0) {
-            if (buffer_out.width >= surfaceWidth && buffer_out.height >= surfaceHeight) {
-                auto* dest = static_cast<uint32_t*>(buffer_out.bits);
-                
-                if (config.showSpectrum) {
-                    SpectrumRenderParams spectrumParams{
-                        surfaceWidth,
-                        surfaceHeight,
-                        TOP_MARGIN,
-                        config.sensitivity,
-                        config.contrast,
-                        config.colorScaleValue,
-                        config.fastWaterfall,
-                        config.spectrumFilled,
-                        config.spectrumConstantColor};
-                    drawSpectrumFrame(dest, buffer_out.stride, lineMagnitudes, spectrumDecayBuffer, spectrumParams);
-                } else {
-                    blitWaterfallFrame(
-                        dest,
-                        buffer_out.stride,
-                        waterfallBuffer,
-                        surfaceWidth,
-                        surfaceHeight,
-                        TOP_MARGIN,
-                        waterfallRows,
-                        waterfallHeadRow,
-                        0xFF000000u);
-                }
-                
-                // Draw +8kHz marker arrow above the spectrum
-                // The marker position depends on the current zoom mode
-                int markerYTop = 0;
-                int markerX = computeMarkerX(surfaceWidth, config.zoom);
-                drawArrowMarkerOnWindow(dest, buffer_out.stride, surfaceWidth, surfaceHeight, config.sampleRate, config.zoom, markerX, markerYTop);
-            }
-            ANativeWindow_unlockAndPost(window);
-        }
-        if (temporaryWindow) {
-            ANativeWindow_release(window);
-        }
-    }
-    auto blitEnd = Clock::now();
-    windowBlitNs += std::chrono::duration_cast<std::chrono::nanoseconds>(blitEnd - blitStart).count();
-
-    auto frameEnd = Clock::now();
-    int64_t frameNs = std::chrono::duration_cast<std::chrono::nanoseconds>(frameEnd - frameStart).count();
-
-    thread_local int64_t profileWindowStartNs = 0;
-    thread_local int profileFrames = 0;
-    thread_local int64_t sumUnpackNs = 0;
-    thread_local int64_t sumFftNs = 0;
-    thread_local int64_t sumMagPassNs = 0;
-    thread_local int64_t sumWaterfallUpdateNs = 0;
-    thread_local int64_t sumWindowBlitNs = 0;
-    thread_local int64_t sumFrameNs = 0;
-
-    int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(frameEnd.time_since_epoch()).count();
-    if (profileWindowStartNs == 0) {
-        profileWindowStartNs = nowNs;
-    }
-
-    profileFrames++;
-    sumUnpackNs += unpackNs;
-    sumFftNs += fftNs;
-    sumMagPassNs += magPassNs;
-    sumWaterfallUpdateNs += waterfallUpdateNs;
-    sumWindowBlitNs += windowBlitNs;
-    sumFrameNs += frameNs;
-
-    if (nowNs - profileWindowStartNs >= 2000000000LL && profileFrames > 0) {
-        double invFrames = 1.0 / profileFrames;
-        LOGI(
-            "perf avg ms: frame=%.3f unpack=%.3f fft=%.3f mag=%.3f water=%.3f blit=%.3f fps=%.1f mode=%s",
-            (sumFrameNs * invFrames) / 1e6,
-            (sumUnpackNs * invFrames) / 1e6,
-            (sumFftNs * invFrames) / 1e6,
-            (sumMagPassNs * invFrames) / 1e6,
-            (sumWaterfallUpdateNs * invFrames) / 1e6,
-            (sumWindowBlitNs * invFrames) / 1e6,
-            (profileFrames * 1e9) / (double)(nowNs - profileWindowStartNs),
-            showSpectrumEnabled ? "spectrum" : "waterfall"
-        );
-
-        profileWindowStartNs = nowNs;
-        profileFrames = 0;
-        sumUnpackNs = 0;
-        sumFftNs = 0;
-        sumMagPassNs = 0;
-        sumWaterfallUpdateNs = 0;
-        sumWindowBlitNs = 0;
-        sumFrameNs = 0;
-    }
-}
-
 // ============================================================================
 // Audio-only processing (FFT + waterfall update, no blit)
 // Called from Kotlin AudioRecord thread. Decoupled from rendering so the audio
@@ -619,7 +453,13 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     computeLineMagnitudes(real, imag, fftSize, surfaceWidth, config.zoom, span, lineMags, minMag, maxMag);
     magPassNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - magTs).count();
 
-    updateSmoothedMagnitudeRange(minMag, maxMag, config.showSpectrum);
+    double displayMinMag = minMag;
+    double displayMaxMag = maxMag;
+    if (!config.showSpectrum) {
+        // Strength=0 preserves legacy min/max scaling; higher values progressively suppress carrier-dominated outliers.
+        computeRobustMagnitudeRange(lineMags, robustScaleStrength, displayMinMag, displayMaxMag);
+    }
+    updateSmoothedMagnitudeRange(displayMinMag, displayMaxMag, config.showSpectrum);
 
     if (!config.showSpectrum && waterfallRows > 0) {
         auto t0 = Clock::now();
@@ -761,17 +601,9 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
     }
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_startOboeCapture(JNIEnv* env, jobject thisObj, jint deviceId, jint sampleRate) {
-    return startOboeCaptureImpl(env, thisObj, deviceId, sampleRate) ? JNI_TRUE : JNI_FALSE;
-}
-
 extern "C" JNIEXPORT void JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_stopOboeCapture(JNIEnv* env, jobject /* this */) {
-    stopOboeCaptureImpl(env);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_setOboeSurface(JNIEnv* env, jobject /* this */, jobject surface) {
-    setOboeSurfaceImpl(env, surface);
+Java_hu_ha8mz_belkarx_MainActivity_setNativeSurface(JNIEnv* env, jobject /* this */, jobject surface) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    setNativeSurfaceLocked(env, surface);
+    LOGI("setNativeSurface: %s", surface != nullptr ? "updated" : "cleared");
 }
