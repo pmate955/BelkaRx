@@ -23,11 +23,11 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
-import android.widget.SeekBar
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
+import com.google.android.material.slider.Slider
 import hu.ha8mz.belkarx.databinding.ActivityMainBinding
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -120,23 +120,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             }
         }
 
-        binding.sensitivitySeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                setSensitivity(progress)
-                if (fromUser) saveSettings()
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
+        binding.sensitivitySeekBar.addOnChangeListener { _: Slider, value: Float, fromUser: Boolean ->
+            setSensitivity(value.toInt())
+            if (fromUser) saveSettings()
+        }
 
-        binding.contrastSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                setContrast(progress)
-                if (fromUser) saveSettings()
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
+        binding.contrastSeekBar.addOnChangeListener { _: Slider, value: Float, fromUser: Boolean ->
+            setContrast(value.toInt())
+            if (fromUser) saveSettings()
+        }
 
         binding.swapIQToggle.setOnCheckedChangeListener { _, isChecked ->
             setSwapIQ(isChecked)
@@ -181,8 +173,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // Load saved settings
         loadSettings()
 
-        setSensitivity(binding.sensitivitySeekBar.progress)
-        setContrast(binding.contrastSeekBar.progress)
+        setSensitivity(binding.sensitivitySeekBar.value.toInt())
+        setContrast(binding.contrastSeekBar.value.toInt())
         setSwapIQ(binding.swapIQToggle.isChecked)
         setZoom(binding.zoomToggle.isChecked)
         setFixedWindowEnabled(true)
@@ -622,8 +614,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun saveSettings() {
         val editor = prefs.edit()
-        editor.putInt("sensitivity", binding.sensitivitySeekBar.progress)
-        editor.putInt("contrast", binding.contrastSeekBar.progress)
+        editor.putInt("sensitivity", binding.sensitivitySeekBar.value.toInt())
+        editor.putInt("contrast", binding.contrastSeekBar.value.toInt())
         editor.putBoolean("swapIQ", binding.swapIQToggle.isChecked)
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
@@ -646,8 +638,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val colorScale = prefs.getInt("colorScale", 0)
         val deviceSelection = prefs.getInt("deviceSelection", 0)
         
-        binding.sensitivitySeekBar.progress = sensitivity
-        binding.contrastSeekBar.progress = contrast
+        binding.sensitivitySeekBar.value = sensitivity.toFloat()
+        binding.contrastSeekBar.value = contrast.toFloat()
         binding.swapIQToggle.isChecked = swapIQ
         binding.zoomToggle.isChecked = zoom
         binding.showSpectrumToggle.isChecked = showSpectrum

@@ -207,14 +207,20 @@
             android:layout_marginBottom="2dp"
             android:text="Sensitivity"
             android:textColor="@android:color/white" />
-        <SeekBar
+        <com.google.android.material.slider.Slider
             android:id="@+id/sensitivitySeekBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginEnd="8dp"
             android:layout_marginStart="8dp"
-            android:max="130"
-            android:progress="75" />
+            android:contentDescription="Sensitivity"
+            android:valueFrom="0"
+            android:valueTo="130"
+            android:value="75"
+            android:stepSize="1"
+            app:haloRadius="20dp"
+            app:thumbRadius="12dp"
+            app:trackHeight="6dp" />
     </LinearLayout>
 
     <LinearLayout
@@ -232,14 +238,20 @@
             android:layout_marginBottom="2dp"
             android:text="Contrast"
             android:textColor="@android:color/white" />
-        <SeekBar
+        <com.google.android.material.slider.Slider
             android:id="@+id/contrastSeekBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginEnd="8dp"
             android:layout_marginStart="8dp"
-            android:max="300"
-            android:progress="100" />
+            android:contentDescription="Contrast"
+            android:valueFrom="0"
+            android:valueTo="300"
+            android:value="100"
+            android:stepSize="1"
+            app:haloRadius="20dp"
+            app:thumbRadius="12dp"
+            app:trackHeight="6dp" />
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
