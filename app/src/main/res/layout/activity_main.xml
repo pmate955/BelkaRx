@@ -4,7 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:paddingTop="16dp"
+    android:paddingTop="0dp"
     tools:context=".MainActivity">
 
     <ToggleButton
@@ -87,6 +87,8 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:checked="false"
+                android:drawableStart="@drawable/ic_toggle_swap_iq"
+                android:drawablePadding="4dp"
                 android:textOff="Swap I/Q"
                 android:textOn="Swap I/Q" />
 
@@ -96,26 +98,12 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"
                 android:checked="false"
+                android:contentDescription="Zoom"
+                android:drawableStart="@drawable/ic_toggle_zoom"
+                android:drawablePadding="0dp"
+                android:minWidth="48dp"
                 android:textOff="Zoom"
                 android:textOn="Zoom" />
-
-            <ToggleButton
-                android:id="@+id/fastWaterfallToggle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:checked="false"
-                android:textOff="Fast"
-                android:textOn="Fast" />
-
-            <ToggleButton
-                android:id="@+id/robustScaleToggle"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:checked="false"
-                android:textOff="Robust"
-                android:textOn="Robust" />
 
             <ToggleButton
                 android:id="@+id/showSpectrumToggle"
@@ -123,6 +111,10 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"
                 android:checked="false"
+                android:contentDescription="Spectrum"
+                android:drawableStart="@drawable/ic_toggle_spectrum"
+                android:drawablePadding="0dp"
+                android:minWidth="48dp"
                 android:textOff="Spectrum"
                 android:textOn="Spectrum" />
 
@@ -143,8 +135,12 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:checked="false"
-                android:textOff="Filled"
-                android:textOn="Filled" />
+                android:contentDescription="Filled spectrum"
+                android:drawableStart="@drawable/ic_toggle_filled"
+                android:drawablePadding="0dp"
+                android:minWidth="48dp"
+                android:textOff="Fill"
+                android:textOn="Fill" />
 
             <ToggleButton
                 android:id="@+id/spectrumConstantColorToggle"
@@ -152,8 +148,12 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"
                 android:checked="false"
-                android:textOff="Monochrome"
-                android:textOn="Monochrome" />
+                android:contentDescription="Monochrome spectrum"
+                android:drawableStart="@drawable/ic_toggle_monochrome"
+                android:drawablePadding="0dp"
+                android:minWidth="48dp"
+                android:textOff="Mono"
+                android:textOn="Mono" />
 
         </LinearLayout>
 
@@ -213,8 +213,8 @@
             android:layout_height="wrap_content"
             android:layout_marginEnd="8dp"
             android:layout_marginStart="8dp"
-            android:max="200"
-            android:progress="100" />
+            android:max="130"
+            android:progress="75" />
     </LinearLayout>
 
     <LinearLayout

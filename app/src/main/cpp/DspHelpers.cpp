@@ -18,8 +18,11 @@ SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled) 
     int baseBins = fftSize / 4;
     if (zoomEnabled) {
         int visibleBins = baseBins / 2;
-        int binHz = sampleRate / fftSize;
-        int startBin = (8000 / binHz) - visibleBins / 2;
+        // Keep the historically watched IF frequency centered in zoom view.
+        // Using double precision avoids integer truncation drift.
+        constexpr double kZoomTrackedHz = 6350.0;
+        double binHz = static_cast<double>(sampleRate) / static_cast<double>(fftSize);
+        int startBin = static_cast<int>(std::lround(kZoomTrackedHz / binHz - (visibleBins * 0.5)));
         return {visibleBins, startBin};
     }
 

@@ -155,17 +155,11 @@ void applyLcdScale(int intensityInt, uint8_t& r, uint8_t& g, uint8_t& b) {
 }  // namespace
 
 uint32_t getColorWithParams(double intensity, int sensitivity, int contrast, int scale) {
+    (void)sensitivity;
+    (void)contrast;
+
     if (intensity < 0) intensity = 0;
     if (intensity > 255) intensity = 255;
-
-    intensity = intensity + (sensitivity - 100) * 0.8;
-    if (intensity < 0) intensity = 0;
-    if (intensity > 255) intensity = 255;
-
-    double contrastExponent = 0.5 + (contrast / 300.0) * 4.0;
-    intensity = intensity / 255.0;
-    intensity = pow(intensity, contrastExponent);
-    intensity = intensity * 255.0;
 
     int intensityInt = static_cast<int>(intensity);
     if (intensityInt < 0) intensityInt = 0;

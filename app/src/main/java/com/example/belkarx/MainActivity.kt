@@ -150,18 +150,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Zoom checkbox changed: $isChecked")
         }
 
-        binding.fastWaterfallToggle.setOnCheckedChangeListener { _, isChecked ->
-            setFastWaterfall(isChecked)
-            saveSettings()
-            Log.d("BelkaRx", "Fast waterfall checkbox changed: $isChecked")
-        }
-
-        binding.robustScaleToggle.setOnCheckedChangeListener { _, isChecked ->
-            setRobustScaleStrength(if (isChecked) 25 else 0)
-            saveSettings()
-            Log.d("BelkaRx", "Robust toggle changed: $isChecked")
-        }
-
         binding.showSpectrumToggle.setOnCheckedChangeListener { _, isChecked ->
             setShowSpectrum(isChecked)
             updateSpectrumOptionControlsEnabled(isChecked)
@@ -197,8 +185,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setContrast(binding.contrastSeekBar.progress)
         setSwapIQ(binding.swapIQToggle.isChecked)
         setZoom(binding.zoomToggle.isChecked)
-        setFastWaterfall(binding.fastWaterfallToggle.isChecked)
-        setRobustScaleStrength(if (binding.robustScaleToggle.isChecked) 25 else 0)
+        setFixedWindowEnabled(true)
         setShowSpectrum(binding.showSpectrumToggle.isChecked)
         setSpectrumFilled(binding.spectrumFilledToggle.isChecked)
         setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
@@ -300,7 +287,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsInlineParams()
             mainToggleContainer.addView(binding.spectrumOptionsContainer)
         } else {
-            // In Portrait: place Spectrum on the same row with Filled and Monochrome.
+            // In Portrait: keep Spectrum on the main row, and place Filled/Monochrome below.
             binding.sensitivityView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
             
@@ -312,8 +299,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.showSpectrumToggle.layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            binding.spectrumOptionsContainer.addView(binding.showSpectrumToggle, 0)
+            ).apply {
+                setMargins(4, 0, 0, 0)
+            }
+            mainToggleContainer.addView(binding.showSpectrumToggle)
 
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsParams()
             controlsContainer.addView(binding.spectrumOptionsContainer)
@@ -637,8 +626,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putInt("contrast", binding.contrastSeekBar.progress)
         editor.putBoolean("swapIQ", binding.swapIQToggle.isChecked)
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
-        editor.putBoolean("fastWaterfall", binding.fastWaterfallToggle.isChecked)
-        editor.putBoolean("robustScaleEnabled", binding.robustScaleToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
@@ -653,8 +640,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val contrast = prefs.getInt("contrast", 100)
         val swapIQ = prefs.getBoolean("swapIQ", false)
         val zoom = prefs.getBoolean("zoom", false)
-        val fastWaterfall = prefs.getBoolean("fastWaterfall", false)
-        val robustScaleEnabled = prefs.getBoolean("robustScaleEnabled", false)
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
@@ -665,8 +650,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.contrastSeekBar.progress = contrast
         binding.swapIQToggle.isChecked = swapIQ
         binding.zoomToggle.isChecked = zoom
-        binding.fastWaterfallToggle.isChecked = fastWaterfall
-        binding.robustScaleToggle.isChecked = robustScaleEnabled
         binding.showSpectrumToggle.isChecked = showSpectrum
         binding.spectrumFilledToggle.isChecked = spectrumFilled
         binding.spectrumConstantColorToggle.isChecked = spectrumConstantColor
@@ -677,7 +660,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.deviceSpinner.setSelection(deviceSelection)
         }
         
-        Log.d("BelkaRx", "Settings loaded: sensitivity=$sensitivity, contrast=$contrast, swapIQ=$swapIQ, zoom=$zoom, robustScaleEnabled=$robustScaleEnabled, colorScale=$colorScale")
+        Log.d("BelkaRx", "Settings loaded: sensitivity=$sensitivity, contrast=$contrast, swapIQ=$swapIQ, zoom=$zoom, colorScale=$colorScale")
     }
 
     private fun stopRecording() {
@@ -733,8 +716,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setNativeSampleRate(rate: Int)
     private external fun setSwapIQ(swap: Boolean)
     private external fun setZoom(enabled: Boolean)
-    private external fun setFastWaterfall(enabled: Boolean)
-    private external fun setRobustScaleStrength(strength: Int)
+    private external fun setFixedWindowEnabled(enabled: Boolean)
     private external fun setShowSpectrum(enabled: Boolean)
     private external fun setColorScale(scale: Int)
     private external fun setSpectrumFilled(filled: Boolean)

@@ -24,13 +24,18 @@ bool drawSpectrumFrame(
     uint32_t* dest,
     int stride,
     const std::vector<double>& lineMagnitudes,
+    std::vector<double>& smoothedBuffer,
     std::vector<double>& decayBuffer,
     const SpectrumRenderParams& params) {
     if ((int)lineMagnitudes.size() != params.surfaceWidth) {
         return false;
     }
 
-    int effectiveSensitivity = static_cast<int>(params.sensitivity * 0.75);
+    int effectiveSensitivity = params.sensitivity;
+
+    if ((int)smoothedBuffer.size() != params.surfaceWidth) {
+        smoothedBuffer.assign(params.surfaceWidth, -1000.0);
+    }
 
     if ((int)decayBuffer.size() != params.surfaceWidth) {
         decayBuffer.assign(params.surfaceWidth, -1000.0);
@@ -46,34 +51,47 @@ bool drawSpectrumFrame(
     }
 
     double refLevel = 250.0 - effectiveSensitivity;
-    double displayRange = 160.0 - (params.contrast / 300.0) * 140.0;
+    constexpr double displayRange = 113.0;
     double minLevel = refLevel - displayRange;
     double invDisplayRange = 1.0 / displayRange;
-    double decayRate = 0.75;
+    double dt = params.frameDeltaSec;
+    if (dt < (1.0 / 240.0)) dt = 1.0 / 240.0;
+    if (dt > 0.25) dt = 0.25;
+    double decayPerFrame = params.decayDbPerSecond * dt;
+    float alpha = params.smoothingAlpha;
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    double invAlpha = 1.0 - alpha;
     int plotHeight = params.surfaceHeight - params.topMargin;
     int prevY = -1;
 
     for (int x = 0; x < params.surfaceWidth; x++) {
         double currentMag = lineMagnitudes[x];
-        double signalForPlot;
-        if (params.fastMode) {
-            decayBuffer[x] = currentMag;
-            signalForPlot = currentMag;
+
+        if (smoothedBuffer[x] < -900.0) {
+            smoothedBuffer[x] = currentMag;
         } else {
-            if (currentMag > decayBuffer[x]) {
-                decayBuffer[x] = currentMag;
-            } else {
-                decayBuffer[x] -= decayRate;
-            }
-            signalForPlot = decayBuffer[x];
+            smoothedBuffer[x] = currentMag * alpha + smoothedBuffer[x] * invAlpha;
         }
+
+        double smoothedMag = smoothedBuffer[x];
+        if (decayBuffer[x] < -900.0 || smoothedMag > decayBuffer[x]) {
+            decayBuffer[x] = smoothedMag;
+        } else {
+            decayBuffer[x] -= decayPerFrame;
+        }
+
+        double signalForPlot = decayBuffer[x];
 
         double normalized = (signalForPlot - minLevel) * invDisplayRange;
         normalized = normalized < 0.0 ? 0.0 : (normalized > 1.0 ? 1.0 : normalized);
 
-        double colorNormalized = liftSpectrumColorNormalized(normalized);
+        double contrastExponent = 0.5 + (params.contrast / 300.0) * 4.0;
+        double shapedNormalized = std::pow(normalized, contrastExponent);
+
+        double colorNormalized = liftSpectrumColorNormalized(shapedNormalized);
         if (params.constantColor) {
-            colorNormalized = 0.75;
+            colorNormalized = 0.8;
         }
 
         uint32_t traceColor = getColorWithParams(

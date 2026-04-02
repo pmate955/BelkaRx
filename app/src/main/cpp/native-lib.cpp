@@ -29,20 +29,21 @@ int waterfallHeadRow = 0;
 std::atomic<int> g_renderHeadSnapshot{0};  // atomic snapshot for render thread
 static std::vector<double> g_lineMagnitudes; // spectrum data for render thread
 static std::mutex g_spectrumMutex;           // protects g_lineMagnitudes
+std::vector<double> spectrumSmoothedBuffer;
 std::vector<double> spectrumDecayBuffer;
 int sensitivityValue = 100;
 int contrastValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
 bool zoomEnabled = false;
-bool fastWaterfallEnabled = false;
-int robustScaleStrength = 0;  // 0 = legacy min/max scaling, 100 = strongest robust scaling
 bool showSpectrumEnabled = false;
 bool isSpectrumFilled = false;  // true: filled bars, false: lines (default)
 bool isSpectrumConstantColor = false;  // true: use constant middle color, false: use dynamic color (default)
 int colorScale = 0;  // 0: Rainbow, 1: Light Blue, 2: Grayscale, 3: Cool-Hot, 4: Green Phosphor, 5: LCD
 
-// Spectrum gain smoothing
+bool fixedWindowEnabled = true;  // fixed dB window is always enabled
+
+// Adaptive EMA magnitude tracking (used when fixedWindowEnabled == false)
 double smoothedMinMag = 110.0;
 double smoothedMaxMag = 170.0;
 
@@ -57,7 +58,7 @@ struct RenderConfigSnapshot {
     int colorScaleValue;
     bool swapIq;
     bool zoom;
-    bool fastWaterfall;
+    bool fixedWindow;
     bool showSpectrum;
     bool spectrumFilled;
     bool spectrumConstantColor;
@@ -67,8 +68,8 @@ int getWaterfallRows(int height) {
     return height > kTopMargin ? (height - kTopMargin) : 0;
 }
 
-int getShiftRows(bool fastWaterfall) {
-    return fastWaterfall ? 3 : 2;
+int getShiftRows() {
+    return 2;
 }
 
 bool hasValidWaterfallBufferLocked(int waterfallRows) {
@@ -88,13 +89,13 @@ void advanceWaterfallHeadLocked(int waterfallRows, int shiftRows) {
     }
 }
 
-void updateSmoothedMagnitudeRange(double minMag, double maxMag, bool showSpectrum) {
-    double alpha = showSpectrum ? 1.0 : 0.4;
+void updateSmoothedMagnitudeRange(double minMag, double maxMag) {
+    constexpr double alpha = 0.4;
     smoothedMinMag = smoothedMinMag * (1.0 - alpha) + minMag * alpha;
     smoothedMaxMag = smoothedMaxMag * (1.0 - alpha) + maxMag * alpha;
 }
 
-void computeRobustMagnitudeRange(const std::vector<double>& lineMags, int robustStrength, double& outMinMag, double& outMaxMag) {
+void computeRobustMagnitudeRange_UNUSED(const std::vector<double>& lineMags, int robustStrength, double& outMinMag, double& outMaxMag) {
     if (robustStrength <= 0) {
         outMinMag = 1e9;
         outMaxMag = -1e9;
@@ -156,7 +157,7 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         colorScale,
         swapIQEnabled,
         zoomEnabled,
-        fastWaterfallEnabled,
+        fixedWindowEnabled,
         showSpectrumEnabled,
         isSpectrumFilled,
         isSpectrumConstantColor};
@@ -164,7 +165,7 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
 
 int computeMarkerX(int width, bool zoom) {
     if (zoom) {
-        return static_cast<int>(std::lround(width / 2.35));
+        return width / 2;
     }
     return static_cast<int>(std::lround((width * 7) / 11.06));
 }
@@ -252,23 +253,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
-    LOGI("setZoom: %s", zoomEnabled ? "true (centered @+8kHz)" : "false (±24kHz @DC)");
+    LOGI("setZoom: %s", zoomEnabled ? "true (centered @+6.2kHz)" : "false (±24kHz @DC)");
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_setFastWaterfall(JNIEnv* env, jobject /* this */, jboolean enabled) {
+Java_hu_ha8mz_belkarx_MainActivity_setFixedWindowEnabled(JNIEnv*, jobject, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    fastWaterfallEnabled = (enabled == JNI_TRUE);
-    LOGI("setFastWaterfall: %s", fastWaterfallEnabled ? "true" : "false");
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_setRobustScaleStrength(JNIEnv* env, jobject /* this */, jint strength) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (strength < 0) strength = 0;
-    if (strength > 100) strength = 100;
-    robustScaleStrength = strength;
-    LOGI("setRobustScaleStrength: %d", robustScaleStrength);
+    fixedWindowEnabled = true;
+    LOGI("setFixedWindowEnabled: true (hardcoded)");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -437,7 +429,7 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     int waterfallRows = getWaterfallRows(surfaceHeight);
     if (!hasValidWaterfallBufferLocked(waterfallRows)) return;
 
-    int shiftRows = getShiftRows(config.fastWaterfall);
+    int shiftRows = getShiftRows();
     if (!config.showSpectrum && waterfallRows > 0) {
         auto t0 = Clock::now();
         advanceWaterfallHeadLocked(waterfallRows, shiftRows);
@@ -453,14 +445,6 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     computeLineMagnitudes(real, imag, fftSize, surfaceWidth, config.zoom, span, lineMags, minMag, maxMag);
     magPassNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - magTs).count();
 
-    double displayMinMag = minMag;
-    double displayMaxMag = maxMag;
-    if (!config.showSpectrum) {
-        // Strength=0 preserves legacy min/max scaling; higher values progressively suppress carrier-dominated outliers.
-        computeRobustMagnitudeRange(lineMags, robustScaleStrength, displayMinMag, displayMaxMag);
-    }
-    updateSmoothedMagnitudeRange(displayMinMag, displayMaxMag, config.showSpectrum);
-
     if (!config.showSpectrum && waterfallRows > 0) {
         auto t0 = Clock::now();
         thread_local std::array<uint32_t, 256> colorLut;
@@ -469,13 +453,32 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
             buildColorLut(config.sensitivity, config.contrast, config.colorScaleValue, colorLut);
             lutSens = config.sensitivity; lutContr = config.contrast; lutSc = config.colorScaleValue;
         }
-        double range = smoothedMaxMag - smoothedMinMag + 1e-6;
-        double invRange = 255.0 / range;
+        // Fixed dB window: sensitivity controls level placement, contrast only shapes color response.
+        double wMin, wMax, invRange;
+        if (config.fixedWindow) {
+            double fwMax = 130.0 - (config.sensitivity - 100) * 0.8;
+            constexpr double fwRange = 70.0;
+            wMin = fwMax - fwRange;
+            wMax = fwMax;
+            invRange = 255.0 / fwRange;
+        } else {
+            // Adaptive EMA autoscale
+            double displayMin = minMag, displayMax = maxMag;
+            updateSmoothedMagnitudeRange(displayMin, displayMax);
+            wMin = smoothedMinMag;
+            wMax = smoothedMaxMag;
+            invRange = 255.0 / (smoothedMaxMag - smoothedMinMag + 1e-6);
+        }
         uint32_t* row = &waterfallBuffer[waterfallHeadRow * surfaceWidth];
+        double contrastExponent = 0.5 + (config.contrast / 300.0) * 4.0;
         for (int x = 0; x < surfaceWidth; x++) {
-            double ni = (lineMags[x] - smoothedMinMag) * invRange;
+            double ni = (lineMags[x] - wMin) * invRange;
             ni = ni < 0.0 ? 0.0 : (ni > 255.0 ? 255.0 : ni);
-            row[x] = colorLut[(int)ni];
+            double shaped = std::pow(ni / 255.0, contrastExponent) * 255.0;
+            int lutIdx = static_cast<int>(shaped);
+            if (lutIdx < 0) lutIdx = 0;
+            if (lutIdx > 255) lutIdx = 255;
+            row[x] = colorLut[lutIdx];
         }
         int dupRows = (shiftRows < waterfallRows) ? shiftRows : waterfallRows;
         for (int r = 1; r < dupRows; r++) {
@@ -555,6 +558,15 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
                     std::lock_guard<std::mutex> specLk(g_spectrumMutex);
                     lineMagCopy = g_lineMagnitudes;
                 }
+
+                static int64_t lastSpectrumRenderNs = 0;
+                int64_t nowSpectrumRenderNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+                double frameDeltaSec = 1.0 / 60.0;
+                if (lastSpectrumRenderNs > 0) {
+                    frameDeltaSec = static_cast<double>(nowSpectrumRenderNs - lastSpectrumRenderNs) / 1e9;
+                }
+                lastSpectrumRenderNs = nowSpectrumRenderNs;
+
                 SpectrumRenderParams spectrumParams{
                     sw,
                     sh,
@@ -562,10 +574,12 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
                     config.sensitivity,
                     config.contrast,
                     config.colorScaleValue,
-                    config.fastWaterfall,
                     config.spectrumFilled,
-                    config.spectrumConstantColor};
-                drawSpectrumFrame(dest, buf.stride, lineMagCopy, spectrumDecayBuffer, spectrumParams);
+                    config.spectrumConstantColor,
+                    0.60f,
+                    45.0,
+                    frameDeltaSec};
+                drawSpectrumFrame(dest, buf.stride, lineMagCopy, spectrumSmoothedBuffer, spectrumDecayBuffer, spectrumParams);
             } else {
                 std::lock_guard<std::mutex> wfLock(g_mutex);
                 int safeHeadRow = waterfallHeadRow;
