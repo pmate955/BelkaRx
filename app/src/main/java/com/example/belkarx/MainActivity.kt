@@ -42,6 +42,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var gestureDetector: GestureDetector
     private lateinit var prefs: android.content.SharedPreferences
     private var suppressZoomToggleCallback = false
+    private val demodModeLabels = arrayOf("AM", "USB", "LSB")
+    private var demodModeIndex = 0
     private val renderFrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!useVsyncRenderLoop) return
@@ -167,6 +169,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Marker checkbox changed: $isChecked")
         }
 
+        binding.demodModeButton.setOnClickListener {
+            demodModeIndex = (demodModeIndex + 1) % demodModeLabels.size
+            updateDemodModeButtonText()
+            setDemodMode(demodModeIndex)
+            saveSettings()
+            Log.d("BelkaRx", "Demod mode changed: ${demodModeLabels[demodModeIndex]}")
+        }
+
         binding.spectrumFilledToggle.setOnCheckedChangeListener { _, isChecked ->
             setSpectrumFilled(isChecked)
             saveSettings()
@@ -198,6 +208,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setFixedWindowEnabled(true)
         setShowSpectrum(binding.showSpectrumToggle.isChecked)
         setAdjustableMarkerEnabled(binding.markerToggle.isChecked)
+        setDemodMode(demodModeIndex)
         setSpectrumFilled(binding.spectrumFilledToggle.isChecked)
         setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
         setColorScale(binding.colorScaleSpinner.selectedItemPosition)
@@ -212,26 +223,29 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         updateFullscreenMode(newConfig.orientation)
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            applyImmersiveFullscreen()
+        }
+    }
+
     private fun updateSpectrumOptionControlsEnabled(isSpectrumEnabled: Boolean) {
         binding.spectrumFilledToggle.isEnabled = isSpectrumEnabled
         binding.spectrumConstantColorToggle.isEnabled = isSpectrumEnabled
     }
 
+    private fun applyImmersiveFullscreen() {
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        )
+        supportActionBar?.hide()
+    }
+
     private fun updateFullscreenMode(orientation: Int) {
-        if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            // Hide the status bar, navigation bar, and set immersive sticky mode in landscape
-            window.decorView.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-            )
-            supportActionBar?.hide()
-        } else {
-            // Show system UI elements in portrait
-            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-            supportActionBar?.hide() // Keep action bar hidden to save space even in portrait
-        }
-        
+        applyImmersiveFullscreen()
         updateLayoutForOrientation(orientation)
     }
 
@@ -246,6 +260,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.spinnerContainer,
             binding.sensitivityView,
             binding.contrastView,
+            binding.demodModeButton,
             binding.showSpectrumToggle,
             binding.spectrumOptionsContainer
         )
@@ -276,12 +291,21 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             setMargins(8, 0, 0, 0)
         }
 
+        fun getTopModeButtonParams() = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(8, 0, 8, 0)
+        }
+
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
             // In Landscape: Sensitivity & Contrast on top, Color Scale in dropdown,
             // spectrum option toggles continue inline on the main toggle row.
             binding.sensitivityView.layoutParams = getTopParams()
-            binding.contrastView.layoutParams = getTopParams(16)
+            binding.demodModeButton.layoutParams = getTopModeButtonParams()
+            binding.contrastView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
+            topContainer.addView(binding.demodModeButton)
             topContainer.addView(binding.contrastView)
             
             binding.spinnerContainer.layoutParams = getDropParams()
@@ -306,6 +330,19 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.contrastView.layoutParams = getDropParams()
             dropdownContainer.addView(binding.spinnerContainer)
             dropdownContainer.addView(binding.contrastView)
+
+            binding.demodModeButton.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(4, 0, 0, 0)
+            }
+            val markerIndex = mainToggleContainer.indexOfChild(binding.markerToggle)
+            if (markerIndex >= 0) {
+                mainToggleContainer.addView(binding.demodModeButton, markerIndex + 1)
+            } else {
+                mainToggleContainer.addView(binding.demodModeButton)
+            }
 
             binding.showSpectrumToggle.layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -629,6 +666,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         saveSettings()
     }
 
+    private fun updateDemodModeButtonText() {
+        binding.demodModeButton.text = demodModeLabels[demodModeIndex]
+    }
+
     private fun saveSettings() {
         val editor = prefs.edit()
         editor.putInt("sensitivity", binding.sensitivitySeekBar.value.toInt())
@@ -637,6 +678,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
         editor.putBoolean("marker", binding.markerToggle.isChecked)
+        editor.putInt("demodMode", demodModeIndex)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
         editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
@@ -652,6 +694,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val zoom = prefs.getBoolean("zoom", false)
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
         val marker = prefs.getBoolean("marker", false)
+        val demodMode = prefs.getInt("demodMode", 0)
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
         val colorScale = prefs.getInt("colorScale", 0)
@@ -663,6 +706,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.zoomToggle.isChecked = zoom
         binding.showSpectrumToggle.isChecked = showSpectrum
         binding.markerToggle.isChecked = marker
+        demodModeIndex = demodMode.coerceIn(0, demodModeLabels.lastIndex)
+        updateDemodModeButtonText()
         binding.spectrumFilledToggle.isChecked = spectrumFilled
         binding.spectrumConstantColorToggle.isChecked = spectrumConstantColor
         binding.colorScaleSpinner.setSelection(colorScale.coerceIn(0, binding.colorScaleSpinner.count - 1))
@@ -733,6 +778,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setShowSpectrum(enabled: Boolean)
     private external fun setAdjustableMarkerEnabled(enabled: Boolean)
     private external fun setAdjustableMarkerTouchX(touchX: Float)
+    private external fun setDemodMode(mode: Int)
     private external fun setColorScale(scale: Int)
     private external fun setSpectrumFilled(filled: Boolean)
     private external fun setSpectrumConstantColor(constant: Boolean)

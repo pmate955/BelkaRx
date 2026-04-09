@@ -40,6 +40,7 @@ bool zoomCenteredFromTouch = false;
 double zoomCenterFrequencyHz = 0.0;
 bool adjustableMarkerEnabled = false;
 double adjustableMarkerFrequencyHz = 0.0;
+int demodMode = 0;  // 0=AM, 1=USB, 2=LSB
 bool showSpectrumEnabled = false;
 bool isSpectrumFilled = false;  // true: filled bars, false: lines (default)
 bool isSpectrumConstantColor = false;  // true: use constant middle color, false: use dynamic color (default)
@@ -66,6 +67,7 @@ struct RenderConfigSnapshot {
     double zoomCenterHz;
     bool adjustableMarkerEnabled;
     double adjustableMarkerFrequencyHz;
+    int demodMode;
     bool fixedWindow;
     bool showSpectrum;
     bool spectrumFilled;
@@ -169,6 +171,7 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         zoomCenterFrequencyHz,
         adjustableMarkerEnabled,
         adjustableMarkerFrequencyHz,
+        demodMode,
         fixedWindowEnabled,
         showSpectrumEnabled,
         isSpectrumFilled,
@@ -182,7 +185,36 @@ int computeMarkerX(int width, bool zoom) {
     return static_cast<int>(std::lround((width * 7) / 11.06));
 }
 
-double computeReferenceFrequencyHz(int width, int sampleRate) {
+double getDemodReferenceOffsetHz(int mode) {
+    switch (mode) {
+        case 1:  // USB
+            return -3000.0;
+        case 2:  // LSB
+        case 0:  // AM
+        default:
+            return 0.0;
+    }
+}
+
+void getDemodReceiveBandOffsetsHz(int mode, double& outStartOffsetHz, double& outEndOffsetHz) {
+    switch (mode) {
+        case 1:  // USB
+            outStartOffsetHz = 0.0;
+            outEndOffsetHz = 3000.0;
+            break;
+        case 2:  // LSB
+            outStartOffsetHz = -3000.0;
+            outEndOffsetHz = 0.0;
+            break;
+        case 0:  // AM
+        default:
+            outStartOffsetHz = -4000.0;
+            outEndOffsetHz = 4000.0;
+            break;
+    }
+}
+
+double computeReferenceFrequencyHz(int width, int sampleRate, int mode) {
     if (width <= 0 || sampleRate <= 0) {
         return 0.0;
     }
@@ -191,9 +223,10 @@ double computeReferenceFrequencyHz(int width, int sampleRate) {
     SpectrumSpan referenceSpan = computeSpectrumSpan(kFftSize, sampleRate, false, false, 0.0);
     double binHz = static_cast<double>(sampleRate) / static_cast<double>(kFftSize);
     int referenceMarkerX = computeMarkerX(width, false);
-    return (static_cast<double>(referenceSpan.startBin) +
-            (static_cast<double>(referenceMarkerX) * static_cast<double>(referenceSpan.visibleBins) / static_cast<double>(width))) *
-           binHz;
+    double baseReferenceHz = (static_cast<double>(referenceSpan.startBin) +
+                              (static_cast<double>(referenceMarkerX) * static_cast<double>(referenceSpan.visibleBins) / static_cast<double>(width))) *
+                             binHz;
+    return baseReferenceHz + getDemodReferenceOffsetHz(mode);
 }
 
 void computeCurrentViewWindowHz(double& outViewStartHz, double& outViewSpanHz) {
@@ -356,9 +389,23 @@ Java_hu_ha8mz_belkarx_MainActivity_setAdjustableMarkerEnabled(JNIEnv* env, jobje
     std::lock_guard<std::mutex> lock(g_mutex);
     adjustableMarkerEnabled = (enabled == JNI_TRUE);
     if (adjustableMarkerEnabled) {
-        adjustableMarkerFrequencyHz = computeReferenceFrequencyHz(surfaceWidth, currentSampleRate);
+        adjustableMarkerFrequencyHz = computeReferenceFrequencyHz(surfaceWidth, currentSampleRate, demodMode);
     }
     LOGI("setAdjustableMarkerEnabled: %s", adjustableMarkerEnabled ? "true" : "false");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setDemodMode(JNIEnv* env, jobject /* this */, jint mode) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    int clampedMode = static_cast<int>(mode);
+    if (clampedMode < 0) clampedMode = 0;
+    if (clampedMode > 2) clampedMode = 2;
+    demodMode = clampedMode;
+    if (adjustableMarkerEnabled) {
+        adjustableMarkerFrequencyHz = computeReferenceFrequencyHz(surfaceWidth, currentSampleRate, demodMode);
+    }
+    const char* modeNames[] = {"AM", "USB", "LSB"};
+    LOGI("setDemodMode: %s", modeNames[demodMode]);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -507,10 +554,52 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int he
     }
 }
 
-void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, int markerPixelX, int markerPixelY, double viewStartHz, double viewSpanHz, double referenceFrequencyHz) {
+static void drawReceiveBandBar(
+    uint32_t* dest,
+    int stride,
+    int width,
+    int height,
+    double viewStartHz,
+    double viewSpanHz,
+    double referenceFrequencyHz,
+    int mode) {
+    if (viewSpanHz <= 1e-9 || width <= 0 || height <= 0) {
+        return;
+    }
+
+    double startOffsetHz = 0.0;
+    double endOffsetHz = 0.0;
+    getDemodReceiveBandOffsetsHz(mode, startOffsetHz, endOffsetHz);
+    double bandStartHz = referenceFrequencyHz + startOffsetHz;
+    double bandEndHz = referenceFrequencyHz + endOffsetHz;
+    if (bandEndHz < bandStartHz) {
+        std::swap(bandStartHz, bandEndHz);
+    }
+
+    int x1 = static_cast<int>(std::lround(((bandStartHz - viewStartHz) / viewSpanHz) * static_cast<double>(width)));
+    int x2 = static_cast<int>(std::lround(((bandEndHz - viewStartHz) / viewSpanHz) * static_cast<double>(width)));
+    if (x2 < x1) std::swap(x1, x2);
+    if (x2 < 0 || x1 >= width) return;
+
+    if (x1 < 0) x1 = 0;
+    if (x2 >= width) x2 = width - 1;
+
+    const uint32_t ORANGE = 0xFF007FFF;
+    int barY = kTopMargin - 2;
+    if (barY < 0) barY = 0;
+    int barYEnd = std::min(height - 1, barY + 4);
+    for (int y = barY; y <= barYEnd; ++y) {
+        for (int x = x1; x <= x2; ++x) {
+            dest[y * stride + x] = ORANGE;
+        }
+    }
+}
+
+void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, int markerPixelX, int markerPixelY, double viewStartHz, double viewSpanHz, double referenceFrequencyHz, int mode) {
     if (markerPixelX < 0 || markerPixelX >= width) return;
     drawArrowHead(dest, stride, width, height, markerPixelX, markerPixelY);
     drawFrequencyGridLines(dest, stride, width, height, markerPixelX, markerPixelY, viewStartHz, viewSpanHz, referenceFrequencyHz);
+    drawReceiveBandBar(dest, stride, width, height, viewStartHz, viewSpanHz, referenceFrequencyHz, mode);
 }
 
 void drawAdjustableMarker(uint32_t* dest, int stride, int width, int height, double viewStartHz, double viewSpanHz, double markerFrequencyHz, double referenceFrequencyHz) {
@@ -547,6 +636,12 @@ void drawAdjustableMarker(uint32_t* dest, int stride, int width, int height, dou
     };
 
     constexpr int kTextScale = 5;
+    constexpr int kTextGlyphWidth = 3;
+    constexpr int kTextGlyphHeight = 5;
+    constexpr int kTextCellWidth = 4;
+    constexpr int kLabelPaddingX = 8;
+    constexpr int kLabelPaddingY = 6;
+    const uint32_t BLACK = 0xFF000000;
 
     auto drawText = [&](int x, int y, const std::string& text) {
         int scale = kTextScale;
@@ -575,6 +670,21 @@ void drawAdjustableMarker(uint32_t* dest, int stride, int width, int height, dou
         }
     };
 
+    auto fillRect = [&](int left, int top, int right, int bottom, uint32_t color) {
+        if (left > right || top > bottom) {
+            return;
+        }
+        if (left < 0) left = 0;
+        if (right >= width) right = width - 1;
+        if (top < 0) top = 0;
+        if (bottom >= height) bottom = height - 1;
+        for (int y = top; y <= bottom; ++y) {
+            for (int x = left; x <= right; ++x) {
+                dest[y * stride + x] = color;
+            }
+        }
+    };
+
     auto formatHzLabel = [](int hz) -> std::string {
         bool negative = hz < 0;
         int absHz = std::abs(hz);
@@ -600,14 +710,23 @@ void drawAdjustableMarker(uint32_t* dest, int stride, int width, int height, dou
     };
 
     int deltaHz = static_cast<int>(std::lround(markerFrequencyHz - referenceFrequencyHz));
-    int labelY = kTopMargin + 30;
-    drawText(markerX, labelY, formatHzLabel(deltaHz));
+    std::string labelText = formatHzLabel(deltaHz);
+    int textWidth = ((static_cast<int>(labelText.size()) * kTextCellWidth - 1) * kTextScale);
+    int textHeight = kTextGlyphHeight * kTextScale;
+    int labelTop = height - textHeight - (2 * kLabelPaddingY) - 12;
+    if (labelTop < kTopMargin + 4) {
+        labelTop = kTopMargin + 4;
+    }
+    int labelBottom = labelTop + textHeight + (2 * kLabelPaddingY) - 1;
+    int labelLeft = markerX - (textWidth / 2) - kLabelPaddingX;
+    int labelRight = markerX + ((textWidth + 1) / 2) + kLabelPaddingX - 1;
 
-    int textHeight = 5 * kTextScale;
-    int lineStartY = labelY + textHeight + 4;
-    if (lineStartY < 0) lineStartY = 0;
-    if (lineStartY > height) lineStartY = height;
-    for (int y = lineStartY; y < height; ++y) {
+    fillRect(labelLeft, labelTop, labelRight, labelBottom, BLACK);
+    drawText(markerX, labelTop + kLabelPaddingY, labelText);
+
+    int lineEndY = labelTop - 4;
+    if (lineEndY < kTopMargin) lineEndY = kTopMargin;
+    for (int y = kTopMargin; y <= lineEndY; ++y) {
         dest[y * stride + markerX] = CYAN;
     }
 }
@@ -826,19 +945,9 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
                 config.zoom,
                 config.zoomHasCustomCenter,
                 config.zoomCenterHz);
-            SpectrumSpan referenceSpan = computeSpectrumSpan(
-                kFftSize,
-                config.sampleRate,
-                false,
-                false,
-                0.0);
             double binHz = static_cast<double>(config.sampleRate) / static_cast<double>(kFftSize);
 
-            int referenceMarkerX = computeMarkerX(sw, false);
-            double referenceFrequencyHz =
-                (static_cast<double>(referenceSpan.startBin) +
-                 (static_cast<double>(referenceMarkerX) * static_cast<double>(referenceSpan.visibleBins) / static_cast<double>(sw))) *
-                binHz;
+            double referenceFrequencyHz = computeReferenceFrequencyHz(sw, config.sampleRate, config.demodMode);
             double viewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
             double viewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
             int mx = static_cast<int>(std::lround(((referenceFrequencyHz - viewStartHz) / viewSpanHz) * static_cast<double>(sw)));
@@ -854,7 +963,8 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
                 0,
                 viewStartHz,
                 viewSpanHz,
-                referenceFrequencyHz);
+                referenceFrequencyHz,
+                config.demodMode);
 
             if (config.adjustableMarkerEnabled) {
                 drawAdjustableMarker(
