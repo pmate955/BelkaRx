@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var useVsyncRenderLoop = false
     private lateinit var gestureDetector: GestureDetector
     private lateinit var prefs: android.content.SharedPreferences
+    private var suppressZoomToggleCallback = false
     private val renderFrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!useVsyncRenderLoop) return
@@ -137,6 +138,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
 
         binding.zoomToggle.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressZoomToggleCallback) {
+                return@setOnCheckedChangeListener
+            }
             setZoom(isChecked)
             saveSettings()
             Log.d("BelkaRx", "Zoom checkbox changed: $isChecked")
@@ -708,6 +712,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setNativeSampleRate(rate: Int)
     private external fun setSwapIQ(swap: Boolean)
     private external fun setZoom(enabled: Boolean)
+    private external fun setZoomFromTouch(enabled: Boolean, touchX: Float)
     private external fun setFixedWindowEnabled(enabled: Boolean)
     private external fun setShowSpectrum(enabled: Boolean)
     private external fun setColorScale(scale: Int)
@@ -717,10 +722,15 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean {
-            // Toggle zoom on double-tap
             val newZoomState = !binding.zoomToggle.isChecked
+            setZoomFromTouch(newZoomState, e.x)
+
+            suppressZoomToggleCallback = true
             binding.zoomToggle.isChecked = newZoomState
-            Log.d("BelkaRx", "Surface double-tap: toggled Zoom to $newZoomState")
+            suppressZoomToggleCallback = false
+
+            saveSettings()
+            Log.d("BelkaRx", "Surface double-tap: toggled Zoom to $newZoomState at x=${e.x}")
             return true
         }
     }

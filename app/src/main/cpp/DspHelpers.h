@@ -9,7 +9,7 @@ struct SpectrumSpan {
 };
 
 void unpackIqSamples(const int16_t* interleavedIq, int fftSize, bool swapIq, std::vector<float>& real, std::vector<float>& imag);
-SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled);
+SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled, bool hasCustomZoomCenter, double customZoomCenterHz);
 void computeLineMagnitudes(
     const std::vector<float>& real,
     const std::vector<float>& imag,

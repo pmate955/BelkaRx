@@ -14,19 +14,28 @@ void unpackIqSamples(const int16_t* interleavedIq, int fftSize, bool swapIq, std
     }
 }
 
-SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled) {
+SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled, bool hasCustomZoomCenter, double customZoomCenterHz) {
     int baseBins = fftSize / 4;
+    int minLogicalBin = -(baseBins / 2);
+    int maxLogicalBin = minLogicalBin + baseBins - 1;
     if (zoomEnabled) {
         int visibleBins = baseBins / 2;
         // Keep the historically watched IF frequency centered in zoom view.
         // Using double precision avoids integer truncation drift.
         constexpr double kZoomTrackedHz = 6350.0;
         double binHz = static_cast<double>(sampleRate) / static_cast<double>(fftSize);
-        int startBin = static_cast<int>(std::lround(kZoomTrackedHz / binHz - (visibleBins * 0.5)));
+        double centerHz = hasCustomZoomCenter ? customZoomCenterHz : kZoomTrackedHz;
+        int startBin = static_cast<int>(std::lround(centerHz / binHz - (visibleBins * 0.5)));
+
+        // Keep the whole zoom window inside the 48 kHz band.
+        int minStart = minLogicalBin;
+        int maxStart = maxLogicalBin - visibleBins + 1;
+        if (startBin < minStart) startBin = minStart;
+        if (startBin > maxStart) startBin = maxStart;
         return {visibleBins, startBin};
     }
 
-    return {baseBins, -(baseBins / 2)};
+    return {baseBins, minLogicalBin};
 }
 
 void computeLineMagnitudes(
@@ -52,17 +61,14 @@ void computeLineMagnitudes(
         if (zoomEnabled) {
             double binPos = (x * (double)span.visibleBins) * invSurfaceWidth;
             int bin1 = (int)binPos;
-            int bin2 = bin1 + 1;
+            int bin2 = (bin1 + 1 < span.visibleBins) ? (bin1 + 1) : bin1;
             double frac = binPos - bin1;
             double invFrac = 1.0 - frac;
 
-            int shiftedBin1 = span.startBin + bin1;
-            int shiftedBin2 = span.startBin + bin2;
-
-            if (shiftedBin1 < 0) shiftedBin1 += fftSize;
-            else if (shiftedBin1 >= fftSize) shiftedBin1 -= fftSize;
-            if (shiftedBin2 < 0) shiftedBin2 += fftSize;
-            else if (shiftedBin2 >= fftSize) shiftedBin2 -= fftSize;
+            int logicalBin1 = span.startBin + bin1;
+            int logicalBin2 = span.startBin + bin2;
+            int shiftedBin1 = logicalBin1 >= 0 ? logicalBin1 : logicalBin1 + fftSize;
+            int shiftedBin2 = logicalBin2 >= 0 ? logicalBin2 : logicalBin2 + fftSize;
 
             double magSq1 = real[shiftedBin1] * real[shiftedBin1] + imag[shiftedBin1] * imag[shiftedBin1];
             double magSq2 = real[shiftedBin2] * real[shiftedBin2] + imag[shiftedBin2] * imag[shiftedBin2];

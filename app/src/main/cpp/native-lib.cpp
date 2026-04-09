@@ -36,6 +36,8 @@ int contrastValue = 100;
 int currentSampleRate = 96000;
 bool swapIQEnabled = false;
 bool zoomEnabled = false;
+bool zoomCenteredFromTouch = false;
+double zoomCenterFrequencyHz = 0.0;
 bool showSpectrumEnabled = false;
 bool isSpectrumFilled = false;  // true: filled bars, false: lines (default)
 bool isSpectrumConstantColor = false;  // true: use constant middle color, false: use dynamic color (default)
@@ -58,6 +60,8 @@ struct RenderConfigSnapshot {
     int colorScaleValue;
     bool swapIq;
     bool zoom;
+    bool zoomHasCustomCenter;
+    double zoomCenterHz;
     bool fixedWindow;
     bool showSpectrum;
     bool spectrumFilled;
@@ -157,6 +161,8 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         colorScale,
         swapIQEnabled,
         zoomEnabled,
+        zoomCenteredFromTouch,
+        zoomCenterFrequencyHz,
         fixedWindowEnabled,
         showSpectrumEnabled,
         isSpectrumFilled,
@@ -253,7 +259,43 @@ extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
+    zoomCenteredFromTouch = false;
     LOGI("setZoom: %s", zoomEnabled ? "true (centered @+6.2kHz)" : "false (±24kHz @DC)");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setZoomFromTouch(JNIEnv* env, jobject /* this */, jboolean enabled, jfloat touchX) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    zoomEnabled = (enabled == JNI_TRUE);
+    if (!zoomEnabled) {
+        zoomCenteredFromTouch = false;
+        LOGI("setZoomFromTouch: false");
+        return;
+    }
+
+    if (surfaceWidth <= 1 || currentSampleRate <= 0) {
+        zoomCenteredFromTouch = false;
+        LOGI("setZoomFromTouch: true but missing surface/sample-rate, fallback to default center");
+        return;
+    }
+
+    float clampedX = std::max(0.0f, std::min(touchX, static_cast<float>(surfaceWidth - 1)));
+    double normalized = static_cast<double>(clampedX) / static_cast<double>(surfaceWidth - 1);
+
+    constexpr int kFftSize = 4096;
+    int fullVisibleBins = kFftSize / 4;
+    int fullStartBin = -(fullVisibleBins / 2);
+    double tappedBin = static_cast<double>(fullStartBin) + (normalized * static_cast<double>(fullVisibleBins));
+    double fullEndBin = static_cast<double>(fullStartBin + fullVisibleBins - 1);
+    if (tappedBin < static_cast<double>(fullStartBin)) tappedBin = static_cast<double>(fullStartBin);
+    if (tappedBin > fullEndBin) tappedBin = fullEndBin;
+    double binHz = static_cast<double>(currentSampleRate) / static_cast<double>(kFftSize);
+
+    zoomCenterFrequencyHz = tappedBin * binHz;
+    zoomCenteredFromTouch = true;
+
+    LOGI("setZoomFromTouch: true x=%.1f normalized=%.4f centerHz=%.1f", touchX, normalized, zoomCenterFrequencyHz);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -323,7 +365,7 @@ static void drawArrowHead(uint32_t* dest, int stride, int surfaceW, int surfaceH
     }
 }
 
-static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int height, int markerX, int markerY, float Hz_per_pixel) {
+static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int height, int markerX, int markerY, double viewStartHz, double viewSpanHz, double referenceFrequencyHz) {
     const uint32_t YELLOW = 0xFF00FFFF;
     const uint8_t font[12][5] = {
         {0x7, 0x5, 0x5, 0x5, 0x7}, {0x2, 0x6, 0x2, 0x2, 0x7}, {0x7, 0x1, 0x7, 0x4, 0x7},
@@ -333,7 +375,7 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int he
     };
 
     auto drawNum = [&](int x, int y, int num) {
-        int scale = 3, cx = x;
+        int scale = 4, cx = x;
         auto drawChar = [&](int charIdx) {
             for (int r = 0; r < 5; ++r) {
                 for (int c = 0; c < 3; ++c) {
@@ -365,27 +407,40 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int he
         }
     };
 
-    for (int offsetKHz = -50; offsetKHz <= 50; offsetKHz += 5) {
-        float pixelOffset = (static_cast<float>(offsetKHz) * 1000.0f) / Hz_per_pixel;
-        int pixelX = markerX + static_cast<int>(std::lround(pixelOffset));
-        if (pixelX < 0 || pixelX >= width || offsetKHz == 0) continue;
-        int lineHeight = (offsetKHz % 10 == 0) ? 20 : 10;
-        for (int y = markerY; y < markerY + lineHeight && y < height; y++) {
-            if (y >= 0) dest[y * stride + pixelX] = YELLOW;
+    if (viewSpanHz <= 1e-9) {
+        return;
+    }
+
+    constexpr double kTickStepHz = 5000.0;
+    double viewEndHz = viewStartHz + viewSpanHz;
+    double firstRelativeHz = std::ceil((viewStartHz - referenceFrequencyHz) / kTickStepHz) * kTickStepHz;
+    double lastRelativeHz = std::floor((viewEndHz - referenceFrequencyHz) / kTickStepHz) * kTickStepHz;
+
+    for (double relativeHz = firstRelativeHz; relativeHz <= lastRelativeHz + 0.5; relativeHz += kTickStepHz) {
+        double tickFrequencyHz = referenceFrequencyHz + relativeHz;
+        int pixelX = static_cast<int>(std::lround(((tickFrequencyHz - viewStartHz) / viewSpanHz) * static_cast<double>(width)));
+        if (pixelX < 0 || pixelX >= width) continue;
+
+        int relativeKHz = static_cast<int>(std::lround(relativeHz / 1000.0));
+        bool majorTick = (relativeKHz % 10) == 0;
+        int lineHeight = majorTick ? 20 : 10;
+
+        if (relativeKHz != 0) {
+            for (int y = markerY; y < markerY + lineHeight && y < height; y++) {
+                if (y >= 0) dest[y * stride + pixelX] = YELLOW;
+            }
         }
-        if (offsetKHz % 10 == 0) drawNum(pixelX, markerY + lineHeight + 2, offsetKHz);
+
+        if (majorTick && relativeKHz != 0) {
+            drawNum(pixelX, markerY + lineHeight + 2, relativeKHz);
+        }
     }
 }
 
-void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, int sampleRate, bool zoom, int markerPixelX, int markerPixelY) {
+void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, int markerPixelX, int markerPixelY, double viewStartHz, double viewSpanHz, double referenceFrequencyHz) {
     if (markerPixelX < 0 || markerPixelX >= width) return;
-    const int FFT_SIZE = 4096;
-    const int BASE_BINS = FFT_SIZE / 4;
-    const float HZ_PER_BIN = static_cast<float>(sampleRate) / FFT_SIZE;
-    int visibleBins = zoom ? BASE_BINS / 2 : BASE_BINS;
-    float Hz_per_pixel = static_cast<float>(visibleBins) * HZ_PER_BIN / static_cast<float>(width);
     drawArrowHead(dest, stride, width, height, markerPixelX, markerPixelY);
-    drawFrequencyGridLines(dest, stride, width, height, markerPixelX, markerPixelY, Hz_per_pixel);
+    drawFrequencyGridLines(dest, stride, width, height, markerPixelX, markerPixelY, viewStartHz, viewSpanHz, referenceFrequencyHz);
 }
 
 // ============================================================================
@@ -436,7 +491,7 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
         waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
     }
 
-    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom);
+    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom, zoomCenteredFromTouch, zoomCenterFrequencyHz);
 
     double minMag = 1e9, maxMag = -1e9;
     thread_local std::vector<double> lineMags;
@@ -595,8 +650,42 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
                     0xFF000000u);
             }
 
-            int mx = computeMarkerX(sw, config.zoom);
-            drawArrowMarkerOnWindow(dest, buf.stride, sw, sh, config.sampleRate, config.zoom, mx, 0);
+            constexpr int kFftSize = 4096;
+            SpectrumSpan scaleSpan = computeSpectrumSpan(
+                kFftSize,
+                config.sampleRate,
+                config.zoom,
+                config.zoomHasCustomCenter,
+                config.zoomCenterHz);
+            SpectrumSpan referenceSpan = computeSpectrumSpan(
+                kFftSize,
+                config.sampleRate,
+                false,
+                false,
+                0.0);
+            double binHz = static_cast<double>(config.sampleRate) / static_cast<double>(kFftSize);
+
+            int referenceMarkerX = computeMarkerX(sw, false);
+            double referenceFrequencyHz =
+                (static_cast<double>(referenceSpan.startBin) +
+                 (static_cast<double>(referenceMarkerX) * static_cast<double>(referenceSpan.visibleBins) / static_cast<double>(sw))) *
+                binHz;
+            double viewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
+            double viewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
+            int mx = static_cast<int>(std::lround(((referenceFrequencyHz - viewStartHz) / viewSpanHz) * static_cast<double>(sw)));
+            if (mx < 0) mx = 0;
+            if (mx >= sw) mx = sw - 1;
+
+            drawArrowMarkerOnWindow(
+                dest,
+                buf.stride,
+                sw,
+                sh,
+                mx,
+                0,
+                viewStartHz,
+                viewSpanHz,
+                referenceFrequencyHz);
         }
         ANativeWindow_unlockAndPost(window);
     }
