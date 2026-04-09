@@ -38,6 +38,8 @@ bool swapIQEnabled = false;
 bool zoomEnabled = false;
 bool zoomCenteredFromTouch = false;
 double zoomCenterFrequencyHz = 0.0;
+bool adjustableMarkerEnabled = false;
+double adjustableMarkerFrequencyHz = 0.0;
 bool showSpectrumEnabled = false;
 bool isSpectrumFilled = false;  // true: filled bars, false: lines (default)
 bool isSpectrumConstantColor = false;  // true: use constant middle color, false: use dynamic color (default)
@@ -62,6 +64,8 @@ struct RenderConfigSnapshot {
     bool zoom;
     bool zoomHasCustomCenter;
     double zoomCenterHz;
+    bool adjustableMarkerEnabled;
+    double adjustableMarkerFrequencyHz;
     bool fixedWindow;
     bool showSpectrum;
     bool spectrumFilled;
@@ -163,6 +167,8 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         zoomEnabled,
         zoomCenteredFromTouch,
         zoomCenterFrequencyHz,
+        adjustableMarkerEnabled,
+        adjustableMarkerFrequencyHz,
         fixedWindowEnabled,
         showSpectrumEnabled,
         isSpectrumFilled,
@@ -174,6 +180,39 @@ int computeMarkerX(int width, bool zoom) {
         return width / 2;
     }
     return static_cast<int>(std::lround((width * 7) / 11.06));
+}
+
+double computeReferenceFrequencyHz(int width, int sampleRate) {
+    if (width <= 0 || sampleRate <= 0) {
+        return 0.0;
+    }
+
+    constexpr int kFftSize = 4096;
+    SpectrumSpan referenceSpan = computeSpectrumSpan(kFftSize, sampleRate, false, false, 0.0);
+    double binHz = static_cast<double>(sampleRate) / static_cast<double>(kFftSize);
+    int referenceMarkerX = computeMarkerX(width, false);
+    return (static_cast<double>(referenceSpan.startBin) +
+            (static_cast<double>(referenceMarkerX) * static_cast<double>(referenceSpan.visibleBins) / static_cast<double>(width))) *
+           binHz;
+}
+
+void computeCurrentViewWindowHz(double& outViewStartHz, double& outViewSpanHz) {
+    if (currentSampleRate <= 0) {
+        outViewStartHz = 0.0;
+        outViewSpanHz = 0.0;
+        return;
+    }
+
+    constexpr int kFftSize = 4096;
+    SpectrumSpan scaleSpan = computeSpectrumSpan(
+        kFftSize,
+        currentSampleRate,
+        zoomEnabled,
+        zoomCenteredFromTouch,
+        zoomCenterFrequencyHz);
+    double binHz = static_cast<double>(currentSampleRate) / static_cast<double>(kFftSize);
+    outViewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
+    outViewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
 }
 
 void setNativeSurfaceLocked(JNIEnv* env, jobject surface) {
@@ -313,6 +352,35 @@ Java_hu_ha8mz_belkarx_MainActivity_setShowSpectrum(JNIEnv* env, jobject /* this 
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setAdjustableMarkerEnabled(JNIEnv* env, jobject /* this */, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    adjustableMarkerEnabled = (enabled == JNI_TRUE);
+    if (adjustableMarkerEnabled) {
+        adjustableMarkerFrequencyHz = computeReferenceFrequencyHz(surfaceWidth, currentSampleRate);
+    }
+    LOGI("setAdjustableMarkerEnabled: %s", adjustableMarkerEnabled ? "true" : "false");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setAdjustableMarkerTouchX(JNIEnv* env, jobject /* this */, jfloat touchX) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!adjustableMarkerEnabled || surfaceWidth <= 1 || currentSampleRate <= 0) {
+        return;
+    }
+
+    float clampedX = std::max(0.0f, std::min(touchX, static_cast<float>(surfaceWidth - 1)));
+    double normalized = static_cast<double>(clampedX) / static_cast<double>(surfaceWidth - 1);
+    double viewStartHz = 0.0;
+    double viewSpanHz = 0.0;
+    computeCurrentViewWindowHz(viewStartHz, viewSpanHz);
+    if (viewSpanHz <= 1e-9) {
+        return;
+    }
+
+    adjustableMarkerFrequencyHz = viewStartHz + normalized * viewSpanHz;
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setColorScale(JNIEnv* env, jobject /* this */, jint scale) {
     std::lock_guard<std::mutex> lock(g_mutex);
     colorScale = scale;
@@ -392,18 +460,20 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int he
             }
             cx += 4 * scale;
         };
-        int numChars = 2;
-        if (std::abs(num) >= 10) numChars = 3;
-        if (std::abs(num) >= 100) numChars = 4;
+
+        std::string digits = std::to_string(std::abs(num));
+        int numChars = static_cast<int>(digits.size());
+        if (num != 0) {
+            numChars += 1;  // sign
+        }
         cx -= ((numChars * 4 - 1) * scale) / 2;
         if (num > 0) drawChar(10);
-        else if (num < 0) { drawChar(11); num = -num; }
-        if (num >= 100) {
-            drawChar(num / 100); drawChar((num / 10) % 10); drawChar(num % 10);
-        } else if (num >= 10) {
-            drawChar(num / 10); drawChar(num % 10);
-        } else {
-            drawChar(num % 10);
+        else if (num < 0) {
+            drawChar(11);
+        }
+
+        for (char ch : digits) {
+            drawChar(ch - '0');
         }
     };
 
@@ -441,6 +511,105 @@ void drawArrowMarkerOnWindow(uint32_t* dest, int stride, int width, int height, 
     if (markerPixelX < 0 || markerPixelX >= width) return;
     drawArrowHead(dest, stride, width, height, markerPixelX, markerPixelY);
     drawFrequencyGridLines(dest, stride, width, height, markerPixelX, markerPixelY, viewStartHz, viewSpanHz, referenceFrequencyHz);
+}
+
+void drawAdjustableMarker(uint32_t* dest, int stride, int width, int height, double viewStartHz, double viewSpanHz, double markerFrequencyHz, double referenceFrequencyHz) {
+    if (viewSpanHz <= 1e-9 || width <= 0 || height <= 0) {
+        return;
+    }
+
+    int markerX = static_cast<int>(std::lround(((markerFrequencyHz - viewStartHz) / viewSpanHz) * static_cast<double>(width)));
+    if (markerX < 0 || markerX >= width) {
+        return;
+    }
+
+    const uint32_t CYAN = 0xFFFFFF00;
+
+    const uint8_t digitFont[10][5] = {
+        {0x7, 0x5, 0x5, 0x5, 0x7}, {0x2, 0x6, 0x2, 0x2, 0x7}, {0x7, 0x1, 0x7, 0x4, 0x7},
+        {0x7, 0x1, 0x7, 0x1, 0x7}, {0x5, 0x5, 0x7, 0x1, 0x1}, {0x7, 0x4, 0x7, 0x1, 0x7},
+        {0x7, 0x4, 0x7, 0x5, 0x7}, {0x7, 0x1, 0x2, 0x2, 0x2}, {0x7, 0x5, 0x7, 0x5, 0x7},
+        {0x7, 0x5, 0x7, 0x1, 0x7}
+    };
+    constexpr uint8_t kGlyphPlus[5] = {0x0, 0x2, 0x7, 0x2, 0x0};
+    constexpr uint8_t kGlyphMinus[5] = {0x0, 0x0, 0x7, 0x0, 0x0};
+    constexpr uint8_t kGlyphSpace[5] = {0x0, 0x0, 0x0, 0x0, 0x0};
+    constexpr uint8_t kGlyphH[5] = {0x5, 0x5, 0x7, 0x5, 0x5};
+    constexpr uint8_t kGlyphz[5] = {0x7, 0x1, 0x2, 0x4, 0x7};
+
+    auto glyphForChar = [&](char ch) -> const uint8_t* {
+        if (ch >= '0' && ch <= '9') return digitFont[ch - '0'];
+        if (ch == '+') return kGlyphPlus;
+        if (ch == '-') return kGlyphMinus;
+        if (ch == 'H') return kGlyphH;
+        if (ch == 'z') return kGlyphz;
+        return kGlyphSpace;
+    };
+
+    constexpr int kTextScale = 5;
+
+    auto drawText = [&](int x, int y, const std::string& text) {
+        int scale = kTextScale;
+        int cx = x;
+        int textChars = static_cast<int>(text.size());
+        cx -= ((textChars * 4 - 1) * scale) / 2;
+
+        for (char ch : text) {
+            const uint8_t* glyph = glyphForChar(ch);
+            for (int r = 0; r < 5; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    if ((glyph[r] >> (2 - c)) & 1) {
+                        for (int sy = 0; sy < scale; ++sy) {
+                            for (int sx = 0; sx < scale; ++sx) {
+                                int px = cx + c * scale + sx;
+                                int py = y + r * scale + sy;
+                                if (px >= 0 && px < width && py >= 0 && py < height) {
+                                    dest[py * stride + px] = CYAN;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cx += 4 * scale;
+        }
+    };
+
+    auto formatHzLabel = [](int hz) -> std::string {
+        bool negative = hz < 0;
+        int absHz = std::abs(hz);
+        std::string digits = std::to_string(absHz);
+        std::string grouped;
+        grouped.reserve(digits.size() + digits.size() / 3);
+
+        int firstGroup = static_cast<int>(digits.size()) % 3;
+        if (firstGroup == 0) firstGroup = 3;
+        grouped.append(digits.substr(0, firstGroup));
+        for (size_t i = static_cast<size_t>(firstGroup); i < digits.size(); i += 3) {
+            grouped.push_back(' ');
+            grouped.append(digits.substr(i, 3));
+        }
+
+        std::string out;
+        if (negative) {
+            out.push_back('-');
+        }
+        out += grouped;
+        out += " Hz";
+        return out;
+    };
+
+    int deltaHz = static_cast<int>(std::lround(markerFrequencyHz - referenceFrequencyHz));
+    int labelY = kTopMargin + 30;
+    drawText(markerX, labelY, formatHzLabel(deltaHz));
+
+    int textHeight = 5 * kTextScale;
+    int lineStartY = labelY + textHeight + 4;
+    if (lineStartY < 0) lineStartY = 0;
+    if (lineStartY > height) lineStartY = height;
+    for (int y = lineStartY; y < height; ++y) {
+        dest[y * stride + markerX] = CYAN;
+    }
 }
 
 // ============================================================================
@@ -686,6 +855,18 @@ Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject sur
                 viewStartHz,
                 viewSpanHz,
                 referenceFrequencyHz);
+
+            if (config.adjustableMarkerEnabled) {
+                drawAdjustableMarker(
+                    dest,
+                    buf.stride,
+                    sw,
+                    sh,
+                    viewStartHz,
+                    viewSpanHz,
+                    config.adjustableMarkerFrequencyHz,
+                    referenceFrequencyHz);
+            }
         }
         ANativeWindow_unlockAndPost(window);
     }

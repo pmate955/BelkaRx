@@ -87,6 +87,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.waterfallSurface.holder.addCallback(this)
         binding.waterfallSurface.setOnTouchListener { _, event ->
             gestureDetector.onTouchEvent(event)
+            if (binding.markerToggle.isChecked) {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN,
+                    MotionEvent.ACTION_MOVE -> {
+                        setAdjustableMarkerTouchX(event.x)
+                    }
+                }
+            }
             true
         }
         
@@ -153,6 +161,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Show spectrum checkbox changed: $isChecked")
         }
 
+        binding.markerToggle.setOnCheckedChangeListener { _, isChecked ->
+            setAdjustableMarkerEnabled(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "Marker checkbox changed: $isChecked")
+        }
+
         binding.spectrumFilledToggle.setOnCheckedChangeListener { _, isChecked ->
             setSpectrumFilled(isChecked)
             saveSettings()
@@ -183,6 +197,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setZoom(binding.zoomToggle.isChecked)
         setFixedWindowEnabled(true)
         setShowSpectrum(binding.showSpectrumToggle.isChecked)
+        setAdjustableMarkerEnabled(binding.markerToggle.isChecked)
         setSpectrumFilled(binding.spectrumFilledToggle.isChecked)
         setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
         setColorScale(binding.colorScaleSpinner.selectedItemPosition)
@@ -260,7 +275,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         ).apply {
             setMargins(8, 0, 0, 0)
         }
-        
+
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
             // In Landscape: Sensitivity & Contrast on top, Color Scale in dropdown,
             // spectrum option toggles continue inline on the main toggle row.
@@ -283,7 +298,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsInlineParams()
             mainToggleContainer.addView(binding.spectrumOptionsContainer)
         } else {
-            // In Portrait: keep Spectrum on the main row, and place Filled/Monochrome below.
+            // In Portrait: place Spectrum + Fill + Mono on the same row.
             binding.sensitivityView.layoutParams = getTopParams()
             topContainer.addView(binding.sensitivityView)
             
@@ -295,10 +310,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             binding.showSpectrumToggle.layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                setMargins(4, 0, 0, 0)
-            }
-            mainToggleContainer.addView(binding.showSpectrumToggle)
+            )
+            binding.spectrumOptionsContainer.addView(binding.showSpectrumToggle, 0)
 
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsParams()
             controlsContainer.addView(binding.spectrumOptionsContainer)
@@ -623,6 +636,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("swapIQ", binding.swapIQToggle.isChecked)
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
+        editor.putBoolean("marker", binding.markerToggle.isChecked)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
         editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
@@ -637,6 +651,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val swapIQ = prefs.getBoolean("swapIQ", false)
         val zoom = prefs.getBoolean("zoom", false)
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
+        val marker = prefs.getBoolean("marker", false)
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
         val colorScale = prefs.getInt("colorScale", 0)
@@ -647,6 +662,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.swapIQToggle.isChecked = swapIQ
         binding.zoomToggle.isChecked = zoom
         binding.showSpectrumToggle.isChecked = showSpectrum
+        binding.markerToggle.isChecked = marker
         binding.spectrumFilledToggle.isChecked = spectrumFilled
         binding.spectrumConstantColorToggle.isChecked = spectrumConstantColor
         binding.colorScaleSpinner.setSelection(colorScale.coerceIn(0, binding.colorScaleSpinner.count - 1))
@@ -715,6 +731,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setZoomFromTouch(enabled: Boolean, touchX: Float)
     private external fun setFixedWindowEnabled(enabled: Boolean)
     private external fun setShowSpectrum(enabled: Boolean)
+    private external fun setAdjustableMarkerEnabled(enabled: Boolean)
+    private external fun setAdjustableMarkerTouchX(touchX: Float)
     private external fun setColorScale(scale: Int)
     private external fun setSpectrumFilled(filled: Boolean)
     private external fun setSpectrumConstantColor(constant: Boolean)
