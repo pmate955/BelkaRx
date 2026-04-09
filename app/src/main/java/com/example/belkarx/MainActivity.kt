@@ -11,6 +11,8 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.content.res.Configuration
 import android.util.Log
 import android.view.Choreographer
@@ -19,6 +21,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.view.ViewGroup
@@ -44,6 +47,21 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var suppressZoomToggleCallback = false
     private val demodModeLabels = arrayOf("AM", "USB", "LSB")
     private var demodModeIndex = 0
+    private val longPressHandler = Handler(Looper.getMainLooper())
+    private var longPressTriggered = false
+    private var longPressDownX = 0f
+    private var longPressDownY = 0f
+    private val markerLongPressTimeoutMs = 1000L
+    private val markerLongPressMoveToleranceMultiplier = 3f
+    private val markerLongPressRunnable = Runnable {
+        longPressTriggered = true
+        val newState = !binding.markerToggle.isChecked
+        binding.markerToggle.isChecked = newState
+        if (newState) {
+            setAdjustableMarkerTouchX(longPressDownX)
+        }
+        Log.d("BelkaRx", "Waterfall long-press: marker toggled to $newState at x=$longPressDownX")
+    }
     private val renderFrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!useVsyncRenderLoop) return
@@ -89,11 +107,36 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.waterfallSurface.holder.addCallback(this)
         binding.waterfallSurface.setOnTouchListener { _, event ->
             gestureDetector.onTouchEvent(event)
+
+            val touchSlop = ViewConfiguration.get(this).scaledTouchSlop.toFloat()
+            val longPressMoveTolerance = touchSlop * markerLongPressMoveToleranceMultiplier
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    longPressDownX = event.x
+                    longPressDownY = event.y
+                    longPressTriggered = false
+                    longPressHandler.removeCallbacks(markerLongPressRunnable)
+                    longPressHandler.postDelayed(markerLongPressRunnable, markerLongPressTimeoutMs)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (kotlin.math.abs(event.x - longPressDownX) > longPressMoveTolerance ||
+                        kotlin.math.abs(event.y - longPressDownY) > longPressMoveTolerance) {
+                        longPressHandler.removeCallbacks(markerLongPressRunnable)
+                    }
+                }
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    longPressHandler.removeCallbacks(markerLongPressRunnable)
+                }
+            }
+
             if (binding.markerToggle.isChecked) {
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN,
                     MotionEvent.ACTION_MOVE -> {
-                        setAdjustableMarkerTouchX(event.x)
+                        if (!longPressTriggered) {
+                            setAdjustableMarkerTouchX(event.x)
+                        }
                     }
                 }
             }
