@@ -2,6 +2,12 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+val ciVersionCode =
+    (providers.gradleProperty("CI_VERSION_CODE").orNull
+        ?: System.getenv("CI_VERSION_CODE"))
+        ?.toIntOrNull()
+        ?: 2
+
 android {
     namespace = "hu.ha8mz.belkarx"
     compileSdk {
@@ -14,7 +20,7 @@ android {
         applicationId = "hu.ha8mz.belkarx"
         minSdk = 28
         targetSdk = 36
-        versionCode = 2
+        versionCode = ciVersionCode
         versionName = "1.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

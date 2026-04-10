@@ -29,6 +29,13 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Compute Android versionCode
+        id: version_code
+        run: |
+          VERSION_CODE=$((100000000 + GITHUB_RUN_NUMBER * 1000 + GITHUB_RUN_ATTEMPT))
+          echo "value=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "Using versionCode=${VERSION_CODE}"
+
       - name: Decode and save keystore
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
@@ -37,7 +44,7 @@ jobs:
 
       - name: Build signed release APK and App Bundle
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        run: ./gradlew assembleRelease bundleRelease
+        run: ./gradlew assembleRelease bundleRelease -PCI_VERSION_CODE=${{ steps.version_code.outputs.value }}
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -45,7 +52,7 @@ jobs:
 
       - name: Build debug APK (non-release builds)
         if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleDebug -PCI_VERSION_CODE=${{ steps.version_code.outputs.value }}
 
       - name: Rename release APK and AAB with version info
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
