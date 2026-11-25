@@ -1,9 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Rounded toggle: subtle outline when off, filled with the primary color when on. -->
+<!-- Rounded toggle: subtle outline when off, filled with the primary color when on, faded when disabled. -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
     android:color="#33FFFFFF">
     <item>
         <selector>
+            <item android:state_enabled="false" android:state_checked="true">
+                <shape android:shape="rectangle">
+                    <corners android:radius="100dp" />
+                    <solid android:color="@color/toggle_disabled_checked_fill" />
+                </shape>
+            </item>
+            <item android:state_enabled="false">
+                <shape android:shape="rectangle">
+                    <corners android:radius="100dp" />
+                    <solid android:color="#08FFFFFF" />
+                    <stroke android:width="1dp" android:color="#1FFFFFFF" />
+                </shape>
+            </item>
             <item android:state_checked="true">
                 <shape android:shape="rectangle">
                     <corners android:radius="100dp" />
