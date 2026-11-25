@@ -12,7 +12,9 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
 import android.content.res.Configuration
 import android.util.Log
 import android.view.Choreographer
@@ -32,6 +34,8 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
 import com.google.android.material.slider.Slider
 import hu.ha8mz.belkarx.databinding.ActivityMainBinding
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
@@ -40,8 +44,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var audioRecord: AudioRecord? = null
     private val isRecording = AtomicBoolean(false)
     private var recordingThread: Thread? = null
-    private var surface: Surface? = null
-    private var useVsyncRenderLoop = false
+    @Volatile private var surface: Surface? = null
+    // The waterfall is drawn on its own thread with its own Choreographer, so UI work
+    // (layout, slider drags, GC pauses on the main thread) cannot delay a frame.
+    private var renderThread: HandlerThread? = null
+    private var renderHandler: Handler? = null
+    @Volatile private var useVsyncRenderLoop = false
     private lateinit var gestureDetector: GestureDetector
     private lateinit var prefs: android.content.SharedPreferences
     private var suppressZoomToggleCallback = false
@@ -64,10 +72,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
     private val renderFrameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
+            // Runs on the render thread; Choreographer.getInstance() is that thread's instance.
             if (!useVsyncRenderLoop) return
-            val s = surface
-            if (isRecording.get() && s != null) {
-                renderFrame(s)
+            if (isRecording.get() && surface != null) {
+                renderFrame(frameTimeNanos)
             }
             Choreographer.getInstance().postFrameCallback(this)
         }
@@ -76,13 +84,30 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun startVsyncRenderLoop() {
         if (useVsyncRenderLoop) return
         useVsyncRenderLoop = true
-        Choreographer.getInstance().postFrameCallback(renderFrameCallback)
+        val handler = renderHandler ?: HandlerThread("BelkaRx-Render", Process.THREAD_PRIORITY_DISPLAY).let { thread ->
+            thread.start()
+            renderThread = thread
+            Handler(thread.looper).also { renderHandler = it }
+        }
+        handler.post {
+            Choreographer.getInstance().removeFrameCallback(renderFrameCallback)
+            Choreographer.getInstance().postFrameCallback(renderFrameCallback)
+        }
     }
 
     private fun stopVsyncRenderLoop() {
         if (!useVsyncRenderLoop) return
         useVsyncRenderLoop = false
-        Choreographer.getInstance().removeFrameCallback(renderFrameCallback)
+        renderHandler?.post { Choreographer.getInstance().removeFrameCallback(renderFrameCallback) }
+    }
+
+    override fun onDestroy() {
+        stopVsyncRenderLoop()
+        renderHandler?.post { releaseRenderer() }
+        renderThread?.quitSafely()
+        renderThread = null
+        renderHandler = null
+        super.onDestroy()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -518,7 +543,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 return false
             }
 
-            Log.i("BelkaRx", "Attempting AudioRecord with UNPROCESSED source: bufferSize=$bufferSize")
+            // Room for 4 FFT windows (~85 ms at 192 kHz), so a late read never overruns
+            // the recorder and drops samples.
+            val fftWindowBytes = FFT_SIZE * 2 /* channels */ * 2 /* bytes */
+            val recordBufferBytes = maxOf(bufferSize * 2, fftWindowBytes * 4)
+            Log.i("BelkaRx", "Attempting AudioRecord with UNPROCESSED source: minBufferSize=$bufferSize, using $recordBufferBytes")
 
             // Try to create AudioRecord with UNPROCESSED source (API 24+)
             audioRecord = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -533,7 +562,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                                 .setChannelMask(channelConfig)
                                 .build()
                         )
-                        .setBufferSizeInBytes(bufferSize * 2)
+                        .setBufferSizeInBytes(recordBufferBytes)
 
                     // Note: setAudioDevice is not available in AudioRecord.Builder
                     // The UNPROCESSED source should handle device selection
@@ -546,7 +575,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         sampleRate,
                         channelConfig,
                         audioFormat,
-                        bufferSize * 2
+                        recordBufferBytes
                     )
                 }
             } else {
@@ -555,7 +584,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     sampleRate,
                     channelConfig,
                     audioFormat,
-                    bufferSize * 2
+                    recordBufferBytes
                 )
             }
 
@@ -615,14 +644,17 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun processAudioViaAudioRecord(recorder: AudioRecord, minBufferSize: Int) {
         Log.i("BelkaRx", "AudioRecord processing thread started (minBufferSize=$minBufferSize bytes)")
         
-        val fftSize = 4096
-        // Read in small chunks (~1 FFT window = 4096 stereo frames = 8192 shorts = 16384 bytes)
-        // minBufferSize is in bytes; convert to shorts and cap at one FFT window size
-        val readChunkShorts = fftSize * 2  // 8192 shorts per read
+        // Small reads (1024 stereo frames, ~5 ms at 192 kHz) keep data flowing steadily instead of
+        // blocking for a whole FFT window at a time.
+        val readChunkShorts = READ_CHUNK_FRAMES * 2
         val shortBuf = ShortArray(readChunkShorts)
         Log.i("BelkaRx", "AudioRecord read chunk: $readChunkShorts shorts (${readChunkShorts * 2} bytes)")
 
-        val outputBuf = ShortArray(fftSize * 2)  // Stereo FFT buffer
+        // Sliding FFT window with 50% overlap: a line is processed every HOP_SIZE frames.
+        // Must match kHopSize in native-lib.cpp.
+        val windowShorts = FFT_SIZE * 2
+        val keepShorts = (FFT_SIZE - HOP_SIZE) * 2
+        val outputBuf = ShortArray(windowShorts)
         var outputIdx = 0
         var read: Int
         var processCount = 0
@@ -686,19 +718,23 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
                 // Copy data into output buffer for processing
                 try {
-                    for (i in 0 until read) {
-                        outputBuf[outputIdx] = shortBuf[i]
-                        outputIdx++
-                        
-                        // When we have enough samples for FFT, process them
-                        if (outputIdx >= fftSize * 2) {
-                            outputIdx = 0
+                    var srcIdx = 0
+                    while (srcIdx < read) {
+                        val n = minOf(read - srcIdx, windowShorts - outputIdx)
+                        System.arraycopy(shortBuf, srcIdx, outputBuf, outputIdx, n)
+                        srcIdx += n
+                        outputIdx += n
+
+                        // When the window is full, process it and keep its second half for the next one.
+                        if (outputIdx >= windowShorts) {
                             processCount++
-                            if (processCount % 10 == 0) {
-                                Log.d("BelkaRx", "Calling processAudioData (count=$processCount, bufSize=${fftSize*2}, stereo=$stereoCount, mono=$monoCount)")
+                            if (processCount % 100 == 0) {
+                                Log.d("BelkaRx", "Calling processAudioData (count=$processCount, stereo=$stereoCount, mono=$monoCount)")
                             }
 
                             processAudioData(outputBuf, outputBuf.size)
+                            System.arraycopy(outputBuf, windowShorts - keepShorts, outputBuf, 0, keepShorts)
+                            outputIdx = keepShorts
                         }
                     }
                 } catch (e: Exception) {
@@ -824,12 +860,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surface = null
-        setNativeSurface(null)
         stopVsyncRenderLoop()
+        // The EGL surface lives on the render thread; it must be gone before this returns.
+        runOnRenderThreadAndWait { releaseRenderSurface() }
+        setNativeSurface(null)
+    }
+
+    private fun runOnRenderThreadAndWait(block: () -> Unit) {
+        val handler = renderHandler ?: return
+        val done = CountDownLatch(1)
+        if (handler.post { try { block() } finally { done.countDown() } }) {
+            done.await(500, TimeUnit.MILLISECONDS)
+        }
     }
 
     private external fun processAudioData(data: ShortArray, size: Int)
-    private external fun renderFrame(surface: Surface)
+    private external fun renderFrame(frameTimeNanos: Long)
+    private external fun releaseRenderSurface()
+    private external fun releaseRenderer()
     private external fun setSurfaceSize(width: Int, height: Int)
     private external fun setSensitivity(value: Int)
     private external fun setContrast(value: Int)
@@ -863,6 +911,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     companion object {
+        private const val FFT_SIZE = 4096          // stereo frames per FFT window
+        private const val HOP_SIZE = 2048          // 50% overlap; must match kHopSize in native-lib.cpp
+        private const val READ_CHUNK_FRAMES = 1024 // stereo frames per AudioRecord.read()
+
         init {
             System.loadLibrary("belkarx")
         }

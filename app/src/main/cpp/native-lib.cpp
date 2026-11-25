@@ -8,6 +8,9 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <memory>
+#include <cstring>
+#include <climits>
 #include <unistd.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -16,6 +19,7 @@
 #include "ColorScales.h"
 #include "DspHelpers.h"
 #include "RenderHelpers.h"
+#include "GlWaterfall.h"
 
 #define LOG_TAG "BelkaRx-Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -24,9 +28,6 @@ std::mutex g_mutex;
 int surfaceWidth = 0;
 int surfaceHeight = 0;
 constexpr int kTopMargin = 15;
-std::vector<uint32_t> waterfallBuffer;
-int waterfallHeadRow = 0;
-std::atomic<int> g_renderHeadSnapshot{0};  // atomic snapshot for render thread
 static std::vector<double> g_lineMagnitudes; // spectrum data for render thread
 static std::mutex g_spectrumMutex;           // protects g_lineMagnitudes
 std::vector<double> spectrumSmoothedBuffer;
@@ -53,6 +54,39 @@ double smoothedMinMag = 110.0;
 double smoothedMaxMag = 170.0;
 
 ANativeWindow* g_nativeWindow = nullptr;
+// Held by the render thread while it draws into g_nativeWindow, and by setNativeSurface while it
+// swaps the window, so surfaceDestroyed cannot release the window in the middle of a frame.
+static std::mutex g_windowMutex;
+static int g_windowGeneration = 0;  // bumped on every window change; forces a full redraw
+
+// One FFT line is produced per kHopSize stereo frames (4096-point FFT, 50% overlap).
+// MainActivity uses the same hop. Only the initial line-rate estimate depends on it:
+// the real rate is measured from the arrival times of the lines.
+constexpr int kHopSize = 2048;
+
+// Waterfall history. The audio thread writes one row per FFT line into slot
+// (rowIndex % capacityRows) and then publishes rowsWritten; the render thread scrolls through
+// the rows at a steady pace and copies them without taking g_mutex. A resize swaps in a new
+// ring, so a reader always holds a shared_ptr to a ring whose size never changes.
+struct WaterfallRing {
+    int width = 0;
+    int height = 0;        // surface height in pixels
+    int visibleRows = 0;   // waterfall rows on screen (height - top margin)
+    int capacityRows = 0;  // visibleRows + kRingExtraRows of look-ahead
+    std::vector<uint32_t> pixels;
+    std::atomic<int64_t> rowsWritten{0};
+};
+constexpr int kRingExtraRows = 256;
+static std::mutex g_ringPtrMutex;  // guards only the g_ring pointer swap
+static std::shared_ptr<WaterfallRing> g_ring;
+
+static std::shared_ptr<WaterfallRing> loadRing() {
+    std::lock_guard<std::mutex> lock(g_ringPtrMutex);
+    return g_ring;
+}
+
+// Measured waterfall row rate (rows per second), written by the audio thread.
+static std::atomic<double> g_rowsPerSecond{192000.0 / kHopSize};
 
 namespace {
 
@@ -76,27 +110,6 @@ struct RenderConfigSnapshot {
 
 int getWaterfallRows(int height) {
     return height > kTopMargin ? (height - kTopMargin) : 0;
-}
-
-int getShiftRows() {
-    return 2;
-}
-
-bool hasValidWaterfallBufferLocked(int waterfallRows) {
-    size_t expectedWaterfallSize = waterfallRows > 0 ? static_cast<size_t>(surfaceWidth * waterfallRows) : 0;
-    return surfaceWidth > 0 && surfaceHeight > 0 && waterfallBuffer.size() == expectedWaterfallSize;
-}
-
-void advanceWaterfallHeadLocked(int waterfallRows, int shiftRows) {
-    if (waterfallRows <= 0) {
-        return;
-    }
-
-    int rowAdvance = shiftRows < waterfallRows ? shiftRows : waterfallRows;
-    waterfallHeadRow -= rowAdvance;
-    while (waterfallHeadRow < 0) {
-        waterfallHeadRow += waterfallRows;
-    }
 }
 
 void updateSmoothedMagnitudeRange(double minMag, double maxMag) {
@@ -178,6 +191,16 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         isSpectrumConstantColor};
 }
 
+bool sameRenderConfig(const RenderConfigSnapshot& a, const RenderConfigSnapshot& b) {
+    return a.sensitivity == b.sensitivity && a.contrast == b.contrast && a.sampleRate == b.sampleRate &&
+           a.colorScaleValue == b.colorScaleValue && a.swapIq == b.swapIq && a.zoom == b.zoom &&
+           a.zoomHasCustomCenter == b.zoomHasCustomCenter && a.zoomCenterHz == b.zoomCenterHz &&
+           a.adjustableMarkerEnabled == b.adjustableMarkerEnabled &&
+           a.adjustableMarkerFrequencyHz == b.adjustableMarkerFrequencyHz && a.demodMode == b.demodMode &&
+           a.fixedWindow == b.fixedWindow && a.showSpectrum == b.showSpectrum &&
+           a.spectrumFilled == b.spectrumFilled && a.spectrumConstantColor == b.spectrumConstantColor;
+}
+
 int computeMarkerX(int width, bool zoom) {
     if (zoom) {
         return width / 2;
@@ -249,53 +272,91 @@ void computeCurrentViewWindowHz(double& outViewStartHz, double& outViewSpanHz) {
 }
 
 void setNativeSurfaceLocked(JNIEnv* env, jobject surface) {
+    ANativeWindow* next = surface != nullptr ? ANativeWindow_fromSurface(env, surface) : nullptr;
+    if (next != nullptr && next == g_nativeWindow) {
+        // Same window (surfaceChanged): keep the EGL surface, drop the extra reference.
+        ANativeWindow_release(next);
+        return;
+    }
     if (g_nativeWindow != nullptr) {
         ANativeWindow_release(g_nativeWindow);
-        g_nativeWindow = nullptr;
     }
-
-    if (surface != nullptr) {
-        g_nativeWindow = ANativeWindow_fromSurface(env, surface);
-    }
+    g_nativeWindow = next;
+    g_windowGeneration++;
 }
 
 }  // namespace
 
+// Radix-2 Cooley-Tukey FFT (in place, n must be a power of two).
+// The bit-reversal swaps and the twiddle factors are computed once per size and reused, so a
+// call is just the swaps and the butterflies. Exact table twiddles are also more accurate than
+// the old per-butterfly rotation recurrence, which accumulated float error along each stage.
 void fft(std::vector<float>& real, std::vector<float>& imag) {
-    size_t n = real.size();
+    const size_t n = real.size();
     if (n <= 1) return;
 
-    // Bit-reversal permutation
-    for (size_t i = 1, j = 0; i < n; i++) {
-        size_t bit = n >> 1;
-        for (; j & bit; bit >>= 1)
+    struct FftTables {
+        size_t size = 0;
+        std::vector<std::pair<uint32_t, uint32_t>> swaps;  // index pairs i < j to exchange
+        std::vector<float> cosTable;                       // cos(-2*pi*k/n), k < n/2
+        std::vector<float> sinTable;                       // sin(-2*pi*k/n), k < n/2
+    };
+    thread_local FftTables tables;
+    if (tables.size != n) {
+        tables.size = n;
+        tables.swaps.clear();
+        for (size_t i = 1, j = 0; i < n; i++) {
+            size_t bit = n >> 1;
+            for (; j & bit; bit >>= 1) j ^= bit;
             j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            std::swap(real[i], real[j]);
-            std::swap(imag[i], imag[j]);
+            if (i < j) tables.swaps.emplace_back(static_cast<uint32_t>(i), static_cast<uint32_t>(j));
+        }
+        tables.cosTable.resize(n / 2);
+        tables.sinTable.resize(n / 2);
+        for (size_t k = 0; k < n / 2; k++) {
+            double angle = -2.0 * M_PI * static_cast<double>(k) / static_cast<double>(n);
+            tables.cosTable[k] = static_cast<float>(std::cos(angle));
+            tables.sinTable[k] = static_cast<float>(std::sin(angle));
         }
     }
 
-    // Iterative Cooley-Tukey butterfly (no heap allocation)
-    for (size_t len = 2; len <= n; len <<= 1) {
-        float ang = static_cast<float>(-2.0 * M_PI / len);
-        float wRe = cosf(ang);
-        float wIm = sinf(ang);
+    float* re = real.data();
+    float* im = imag.data();
+    const float* cosT = tables.cosTable.data();
+    const float* sinT = tables.sinTable.data();
+
+    for (const auto& s : tables.swaps) {
+        std::swap(re[s.first], re[s.second]);
+        std::swap(im[s.first], im[s.second]);
+    }
+
+    // First stage (len = 2): twiddle is 1, no multiplications needed.
+    for (size_t i = 0; i < n; i += 2) {
+        float aRe = re[i], aIm = im[i];
+        float bRe = re[i + 1], bIm = im[i + 1];
+        re[i] = aRe + bRe;     im[i] = aIm + bIm;
+        re[i + 1] = aRe - bRe; im[i + 1] = aIm - bIm;
+    }
+
+    for (size_t len = 4; len <= n; len <<= 1) {
+        const size_t half = len >> 1;
+        const size_t step = n / len;  // twiddle index stride for this stage
         for (size_t i = 0; i < n; i += len) {
-            float curRe = 1.0f, curIm = 0.0f;
-            for (size_t j = 0; j < len / 2; j++) {
-                float uRe = real[i + j];
-                float uIm = imag[i + j];
-                float tRe = curRe * real[i + j + len/2] - curIm * imag[i + j + len/2];
-                float tIm = curRe * imag[i + j + len/2] + curIm * real[i + j + len/2];
-                real[i + j]          = uRe + tRe;
-                imag[i + j]          = uIm + tIm;
-                real[i + j + len/2]  = uRe - tRe;
-                imag[i + j + len/2]  = uIm - tIm;
-                float nextRe = curRe * wRe - curIm * wIm;
-                curIm         = curRe * wIm + curIm * wRe;
-                curRe         = nextRe;
+            float* aRe = re + i;
+            float* aIm = im + i;
+            float* bRe = re + i + half;
+            float* bIm = im + i + half;
+            for (size_t j = 0, k = 0; j < half; j++, k += step) {
+                const float wRe = cosT[k];
+                const float wIm = sinT[k];
+                const float tRe = wRe * bRe[j] - wIm * bIm[j];
+                const float tIm = wRe * bIm[j] + wIm * bRe[j];
+                const float uRe = aRe[j];
+                const float uIm = aIm[j];
+                aRe[j] = uRe + tRe;
+                aIm[j] = uIm + tIm;
+                bRe[j] = uRe - tRe;
+                bIm[j] = uIm - tIm;
             }
         }
     }
@@ -305,13 +366,19 @@ void fft(std::vector<float>& real, std::vector<float>& imag) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setSurfaceSize(JNIEnv* env, jobject /* this */, jint width, jint height) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    surfaceWidth = width;
-    surfaceHeight = height;
-    int waterfallRows = getWaterfallRows(height);
-    waterfallBuffer.assign(width * waterfallRows, 0xFF000000);
-    waterfallHeadRow = 0;
-    g_renderHeadSnapshot.store(0, std::memory_order_relaxed);
+    auto ring = std::make_shared<WaterfallRing>();
+    ring->width = width > 0 ? width : 0;
+    ring->height = height > 0 ? height : 0;
+    ring->visibleRows = getWaterfallRows(ring->height);
+    ring->capacityRows = ring->visibleRows > 0 ? ring->visibleRows + kRingExtraRows : 0;
+    ring->pixels.assign(static_cast<size_t>(ring->width) * ring->capacityRows, 0xFF000000u);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        surfaceWidth = width;
+        surfaceHeight = height;
+    }
+    std::lock_guard<std::mutex> lock(g_ringPtrMutex);
+    g_ring = std::move(ring);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -742,100 +809,108 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     auto frameStart = Clock::now();
     int64_t unpackNs = 0, fftNs = 0, magPassNs = 0, waterfallUpdateNs = 0;
 
-    jshort* buffer = env->GetShortArrayElements(data, nullptr);
-    if (buffer == nullptr) return;
+    constexpr int fftSize = 4096;
+    if (size < 2 * fftSize) return;
 
-    int fftSize = 4096;
-    if (size < 2 * fftSize) {
-        env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
-        return;
+    // Copy straight into a reused native buffer (no pinning, no extra Java-side copy).
+    thread_local std::vector<jshort> samples;
+    if (samples.size() != static_cast<size_t>(2 * fftSize)) samples.resize(2 * fftSize);
+    env->GetShortArrayRegion(data, 0, 2 * fftSize, samples.data());
+
+    RenderConfigSnapshot config;
+    {
+        std::lock_guard<std::mutex> lk(g_mutex);
+        config = snapshotRenderConfigLocked();
     }
 
     thread_local std::vector<float> real, imag;
     if (real.size() != (size_t)fftSize) { real.resize(fftSize); imag.resize(fftSize); }
 
-    {
-        auto t0 = Clock::now();
-        std::lock_guard<std::mutex> lk(g_mutex);
-        unpackIqSamples(buffer, fftSize, swapIQEnabled, real, imag);
-        unpackNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
-    }
-    env->ReleaseShortArrayElements(data, buffer, JNI_ABORT);
+    auto t0 = Clock::now();
+    unpackIqSamples(samples.data(), fftSize, config.swapIq, real, imag);
+    unpackNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
 
     auto fftStart = Clock::now();
     fft(real, imag);
     fftNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - fftStart).count();
 
-    std::lock_guard<std::mutex> lk(g_mutex);
-    const int TOP_MARGIN = kTopMargin;
-    RenderConfigSnapshot config = snapshotRenderConfigLocked();
-    int waterfallRows = getWaterfallRows(surfaceHeight);
-    if (!hasValidWaterfallBufferLocked(waterfallRows)) return;
+    std::shared_ptr<WaterfallRing> ring = loadRing();
+    if (!ring || ring->width <= 0 || ring->visibleRows <= 0) return;
+    const int width = ring->width;
 
-    int shiftRows = getShiftRows();
-    if (!config.showSpectrum && waterfallRows > 0) {
-        auto t0 = Clock::now();
-        advanceWaterfallHeadLocked(waterfallRows, shiftRows);
-        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
-    }
-
-    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom, zoomCenteredFromTouch, zoomCenterFrequencyHz);
+    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz);
 
     double minMag = 1e9, maxMag = -1e9;
     thread_local std::vector<double> lineMags;
-    if ((int)lineMags.size() != surfaceWidth) lineMags.resize(surfaceWidth);
+    if ((int)lineMags.size() != width) lineMags.resize(width);
     auto magTs = Clock::now();
-    computeLineMagnitudes(real, imag, fftSize, surfaceWidth, config.zoom, span, lineMags, minMag, maxMag);
+    computeLineMagnitudes(real, imag, fftSize, width, config.zoom, span, lineMags, minMag, maxMag);
     magPassNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - magTs).count();
 
-    if (!config.showSpectrum && waterfallRows > 0) {
-        auto t0 = Clock::now();
+    if (!config.showSpectrum) {
+        auto tw = Clock::now();
+        // Level -> color table with the contrast curve folded in, so there is no pow() per pixel.
+        constexpr int kShapedLutSize = 1024;
         thread_local std::array<uint32_t, 256> colorLut;
+        thread_local std::array<uint32_t, kShapedLutSize> shapedLut;
         thread_local int lutSens = -1, lutContr = -1, lutSc = -1;
         if (lutSens != config.sensitivity || lutContr != config.contrast || lutSc != config.colorScaleValue) {
             buildColorLut(config.sensitivity, config.contrast, config.colorScaleValue, colorLut);
+            double contrastExponent = 0.5 + (config.contrast / 300.0) * 4.0;
+            for (int i = 0; i < kShapedLutSize; i++) {
+                double shaped = std::pow(static_cast<double>(i) / (kShapedLutSize - 1), contrastExponent) * 255.0;
+                int idx = static_cast<int>(shaped);
+                shapedLut[i] = colorLut[idx < 0 ? 0 : (idx > 255 ? 255 : idx)];
+            }
             lutSens = config.sensitivity; lutContr = config.contrast; lutSc = config.colorScaleValue;
         }
         // Fixed dB window: sensitivity controls level placement, contrast only shapes color response.
-        double wMin, wMax, invRange;
+        double wMin, wRange;
         if (config.fixedWindow) {
             double fwMax = 130.0 - (config.sensitivity - 100) * 0.8;
             constexpr double fwRange = 70.0;
             wMin = fwMax - fwRange;
-            wMax = fwMax;
-            invRange = 255.0 / fwRange;
+            wRange = fwRange;
         } else {
             // Adaptive EMA autoscale
-            double displayMin = minMag, displayMax = maxMag;
-            updateSmoothedMagnitudeRange(displayMin, displayMax);
+            updateSmoothedMagnitudeRange(minMag, maxMag);
             wMin = smoothedMinMag;
-            wMax = smoothedMaxMag;
-            invRange = 255.0 / (smoothedMaxMag - smoothedMinMag + 1e-6);
+            wRange = smoothedMaxMag - smoothedMinMag + 1e-6;
         }
-        uint32_t* row = &waterfallBuffer[waterfallHeadRow * surfaceWidth];
-        double contrastExponent = 0.5 + (config.contrast / 300.0) * 4.0;
-        for (int x = 0; x < surfaceWidth; x++) {
-            double ni = (lineMags[x] - wMin) * invRange;
-            ni = ni < 0.0 ? 0.0 : (ni > 255.0 ? 255.0 : ni);
-            double shaped = std::pow(ni / 255.0, contrastExponent) * 255.0;
-            int lutIdx = static_cast<int>(shaped);
-            if (lutIdx < 0) lutIdx = 0;
-            if (lutIdx > 255) lutIdx = 255;
-            row[x] = colorLut[lutIdx];
+        double lutScale = (kShapedLutSize - 1) / wRange;
+
+        // Write the new row into the slot after the newest one; the renderer never shows that slot.
+        int64_t rowIndex = ring->rowsWritten.load(std::memory_order_relaxed);
+        uint32_t* row = &ring->pixels[static_cast<size_t>(rowIndex % ring->capacityRows) * width];
+        for (int x = 0; x < width; x++) {
+            double t = (lineMags[x] - wMin) * lutScale;
+            int idx = t <= 0.0 ? 0 : (t >= kShapedLutSize - 1 ? kShapedLutSize - 1 : static_cast<int>(t));
+            row[x] = shapedLut[idx];
         }
-        int dupRows = (shiftRows < waterfallRows) ? shiftRows : waterfallRows;
-        for (int r = 1; r < dupRows; r++) {
-            int pr = waterfallHeadRow + r;
-            if (pr >= waterfallRows) pr -= waterfallRows;
-            memcpy(&waterfallBuffer[pr * surfaceWidth], row, surfaceWidth * sizeof(uint32_t));
+        ring->rowsWritten.store(rowIndex + 1, std::memory_order_release);
+
+        // Track the real line rate from arrival times (EMA of the interval over ~50 lines).
+        thread_local Clock::time_point lastLineTime{};
+        thread_local double emaIntervalSec = 0.0;
+        thread_local int emaRate = 0;
+        auto now = Clock::now();
+        if (emaRate != config.sampleRate || emaIntervalSec <= 0.0) {
+            emaRate = config.sampleRate;
+            emaIntervalSec = config.sampleRate > 0 ? static_cast<double>(kHopSize) / config.sampleRate : 0.02;
+        } else {
+            double dt = std::chrono::duration<double>(now - lastLineTime).count();
+            if (dt > 0.0 && dt < 0.5) {
+                emaIntervalSec += (dt - emaIntervalSec) * 0.02;
+            }
         }
-        waterfallUpdateNs += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
-        // Publish head row for render thread with release ordering
-        g_renderHeadSnapshot.store(waterfallHeadRow, std::memory_order_release);
-    } else if (config.showSpectrum) {
+        lastLineTime = now;
+        g_rowsPerSecond.store(1.0 / emaIntervalSec, std::memory_order_relaxed);
+
+        waterfallUpdateNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - tw).count();
+    } else {
         std::lock_guard<std::mutex> specLk(g_spectrumMutex);
-        if ((int)g_lineMagnitudes.size() != surfaceWidth) g_lineMagnitudes.resize(surfaceWidth);
-        memcpy(g_lineMagnitudes.data(), lineMags.data(), surfaceWidth * sizeof(double));
+        if ((int)g_lineMagnitudes.size() != width) g_lineMagnitudes.resize(width);
+        memcpy(g_lineMagnitudes.data(), lineMags.data(), width * sizeof(double));
     }
 
     auto frameEnd = Clock::now();
@@ -847,7 +922,7 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     profN++; sU += unpackNs; sF += fftNs; sM += magPassNs; sW += waterfallUpdateNs; sFr += frameNs;
     if (nowNs - profWin >= 2000000000LL && profN > 0) {
         double inv = 1.0 / profN;
-        LOGI("audio avg ms: frame=%.3f unpack=%.3f fft=%.3f mag=%.3f water=%.3f fps=%.1f",
+        LOGI("audio avg ms: frame=%.3f unpack=%.3f fft=%.3f mag=%.3f water=%.3f lines/s=%.1f",
             (sFr*inv)/1e6, (sU*inv)/1e6, (sF*inv)/1e6, (sM*inv)/1e6, (sW*inv)/1e6,
             (profN * 1e9) / (double)(nowNs - profWin));
         profWin = nowNs; profN = 0; sU = sF = sM = sW = sFr = 0;
@@ -855,149 +930,235 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
 }
 
 // ============================================================================
-// Vsync-aligned blit (render only) - called from Choreographer on UI thread.
-// ANativeWindow_lock fires right after vsync so a buffer is always immediately
-// available, eliminating the ~5-6 ms blocking wait that was stalling the audio
-// thread and causing stutter.
+// Vsync-paced GPU render, called once per display frame from MainActivity's
+// render thread (its own Choreographer, not the UI thread).
+//
+// Lines arrive in bursts (audio buffer periods) at ~94/s, while the display runs
+// at 60-120 Hz. The renderer keeps a small look-ahead of rows (kTargetLatencySec)
+// and scrolls through them at the measured line rate, nudging the speed to keep
+// the look-ahead steady. The scroll position is fractional and the GPU
+// interpolates between rows, so every frame moves by exactly the right amount.
 // ============================================================================
-extern "C" JNIEXPORT void JNICALL
-Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jobject surface) {
-    using Clock = std::chrono::steady_clock;
-    auto blitStart = Clock::now();
+namespace {
 
-    ANativeWindow* window = g_nativeWindow;
-    bool tempWin = false;
-    if (!window && surface) {
-        window = ANativeWindow_fromSurface(env, surface);
-        tempWin = (window != nullptr);
+constexpr double kTargetLatencySec = 0.08;  // look-ahead that absorbs audio burst jitter
+constexpr double kCatchUpPerSec = 0.8;      // how fast the speed corrects the look-ahead error
+
+struct ScrollPacer {
+    const WaterfallRing* ring = nullptr;
+    bool started = false;
+    double position = 0.0;  // ring row index shown at the top of the waterfall (fractional)
+    int64_t lastFrameNs = 0;
+    int underruns = 0;      // frames where the scroll had to wait for data
+};
+
+// Render-thread-only state.
+ScrollPacer g_pacer;
+GlWaterfall g_gl;
+int64_t g_rowsUploaded = 0;  // ring rows already copied into the GL texture
+std::vector<uint32_t> g_overlayPixels;
+bool g_overlayValid = false;
+RenderConfigSnapshot g_overlayConfig{};
+int g_overlayWidth = 0, g_overlayHeight = 0;
+
+double advanceScroll(ScrollPacer& pacer, const WaterfallRing& ring, int64_t newestRow, int64_t frameTimeNs) {
+    double newest = static_cast<double>(newestRow);
+    double rate = g_rowsPerSecond.load(std::memory_order_relaxed);
+    double targetLead = std::max(3.0, rate * kTargetLatencySec);
+    // How far the writer may run ahead before it would overwrite rows still on screen.
+    double maxLead = kRingExtraRows / 2.0;
+
+    if (!pacer.started || pacer.ring != &ring) {
+        pacer.ring = &ring;
+        pacer.started = true;
+        pacer.position = newest - targetLead;
+        pacer.lastFrameNs = frameTimeNs;
     }
+
+    double dt = static_cast<double>(frameTimeNs - pacer.lastFrameNs) / 1e9;
+    if (dt < 0.0) dt = 0.0;
+    if (dt > 0.1) dt = 0.1;
+    pacer.lastFrameNs = frameTimeNs;
+
+    double lead = newest - pacer.position;
+    if (lead > maxLead) {
+        // Far behind (e.g. no frames were drawn for a while): jump instead of racing.
+        pacer.position = newest - targetLead;
+    } else {
+        double speed = rate + (lead - targetLead) * kCatchUpPerSec;
+        if (speed < 0.0) speed = 0.0;
+        if (speed > rate * 1.5) speed = rate * 1.5;
+        pacer.position += speed * dt;
+        // Never scroll onto rows that have not been written yet. The B-spline filter reads up
+        // to two rows ahead of floor(position), so stay at least one row behind the newest.
+        if (pacer.position > newest - 1.0) {
+            pacer.position = newest - 1.0;
+            pacer.underruns++;
+        }
+    }
+    return pacer.position;
+}
+
+// The overlay only depends on these settings (not on sensitivity, contrast or colors).
+bool sameOverlayConfig(const RenderConfigSnapshot& a, const RenderConfigSnapshot& b) {
+    return a.sampleRate == b.sampleRate && a.zoom == b.zoom && a.zoomHasCustomCenter == b.zoomHasCustomCenter &&
+           a.zoomCenterHz == b.zoomCenterHz && a.demodMode == b.demodMode &&
+           a.adjustableMarkerEnabled == b.adjustableMarkerEnabled &&
+           a.adjustableMarkerFrequencyHz == b.adjustableMarkerFrequencyHz;
+}
+
+// Draws the frequency scale, the demod marker and the adjustable marker into `dest`.
+void drawOverlayMarks(uint32_t* dest, int width, int height, const RenderConfigSnapshot& config) {
+    constexpr int kFftSize = 4096;
+    SpectrumSpan scaleSpan = computeSpectrumSpan(
+        kFftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz);
+    double binHz = static_cast<double>(config.sampleRate) / static_cast<double>(kFftSize);
+
+    double referenceFrequencyHz = computeReferenceFrequencyHz(width, config.sampleRate, config.demodMode);
+    double viewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
+    double viewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
+    int mx = static_cast<int>(std::lround(((referenceFrequencyHz - viewStartHz) / viewSpanHz) * static_cast<double>(width)));
+    if (mx < 0) mx = 0;
+    if (mx >= width) mx = width - 1;
+
+    drawArrowMarkerOnWindow(dest, width, width, height, mx, 0, viewStartHz, viewSpanHz, referenceFrequencyHz, config.demodMode);
+    if (config.adjustableMarkerEnabled) {
+        drawAdjustableMarker(dest, width, width, height, viewStartHz, viewSpanHz,
+                             config.adjustableMarkerFrequencyHz, referenceFrequencyHz);
+    }
+}
+
+// Copies the ring rows written since the last frame into the GL texture.
+void uploadNewWaterfallRows(const WaterfallRing& ring, int64_t written) {
+    int64_t first = std::max(g_rowsUploaded, written - ring.capacityRows + 1);
+    if (first < 0) first = 0;
+    while (first < written) {
+        int slot = static_cast<int>(first % ring.capacityRows);
+        int count = static_cast<int>(std::min<int64_t>(written - first, ring.capacityRows - slot));
+        g_gl.uploadWaterfallRows(slot, count, ring.pixels.data());
+        first += count;
+    }
+    g_rowsUploaded = written;
+}
+
+}  // namespace
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_renderFrame(JNIEnv* env, jobject, jlong frameTimeNanos) {
+    using Clock = std::chrono::steady_clock;
+    auto renderStart = Clock::now();
+
+    std::lock_guard<std::mutex> windowLock(g_windowMutex);
+    ANativeWindow* window = g_nativeWindow;
     if (!window) return;
 
-    // Read atomic head row snapshot (acquire ordering ensures waterfall pixel visibility)
-    int headRow = g_renderHeadSnapshot.load(std::memory_order_acquire);
+    std::shared_ptr<WaterfallRing> ring = loadRing();
+    if (!ring || ring->width <= 0 || ring->capacityRows <= 0) return;
 
-    // Dimensions are written only from the UI thread (surfaceChanged → setSurfaceSize),
-    // so reading them here on the UI thread (Choreographer) is race-free.
-    int sw = surfaceWidth, sh = surfaceHeight;
-    int waterfallRows = getWaterfallRows(sh);
-    
+    int sw = 0, sh = 0;
+    if (!g_gl.makeCurrent(window, g_windowGeneration, sw, sh)) return;
+
     RenderConfigSnapshot config;
     {
         std::lock_guard<std::mutex> lk(g_mutex);
         config = snapshotRenderConfigLocked();
     }
 
-    if (sw <= 0 || sh <= 0) { if (tempWin) ANativeWindow_release(window); return; }
+    // Waterfall texture: recreate on resize, then upload only the new rows.
+    int64_t written = ring->rowsWritten.load(std::memory_order_acquire);
+    if (g_gl.ensureWaterfallTexture(ring.get(), ring->width, ring->capacityRows, ring->pixels.data())) {
+        g_rowsUploaded = written;  // the initial upload already holds every row written so far
+    }
+    uploadNewWaterfallRows(*ring, written);
 
-    ANativeWindow_Buffer buf;
-    if (ANativeWindow_lock(window, &buf, nullptr) == 0) {
-        if (buf.width >= sw && buf.height >= sh) {
-            auto* dest = static_cast<uint32_t*>(buf.bits);
-            const int TOP_MARGIN = kTopMargin;
+    double position = advanceScroll(g_pacer, *ring, written - 1, frameTimeNanos);
+    int64_t oldestValid = std::max<int64_t>(0, written - ring->capacityRows + 1);
+    // The B-spline filter also reads one row older than the sampled pair.
+    double maxAge = position - static_cast<double>(oldestValid) - 1.0;
 
-            if (config.showSpectrum) {
-                std::vector<double> lineMagCopy;
-                {
-                    std::lock_guard<std::mutex> specLk(g_spectrumMutex);
-                    lineMagCopy = g_lineMagnitudes;
-                }
-
-                static int64_t lastSpectrumRenderNs = 0;
-                int64_t nowSpectrumRenderNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
-                double frameDeltaSec = 1.0 / 60.0;
-                if (lastSpectrumRenderNs > 0) {
-                    frameDeltaSec = static_cast<double>(nowSpectrumRenderNs - lastSpectrumRenderNs) / 1e9;
-                }
-                lastSpectrumRenderNs = nowSpectrumRenderNs;
-
-                SpectrumRenderParams spectrumParams{
-                    sw,
-                    sh,
-                    TOP_MARGIN,
-                    config.sensitivity,
-                    config.contrast,
-                    config.colorScaleValue,
-                    config.spectrumFilled,
-                    config.spectrumConstantColor,
-                    0.60f,
-                    45.0,
-                    frameDeltaSec};
-                drawSpectrumFrame(dest, buf.stride, lineMagCopy, spectrumSmoothedBuffer, spectrumDecayBuffer, spectrumParams);
-            } else {
-                std::lock_guard<std::mutex> wfLock(g_mutex);
-                int safeHeadRow = waterfallHeadRow;
-                blitWaterfallFrame(
-                    dest,
-                    buf.stride,
-                    waterfallBuffer,
-                    sw,
-                    sh,
-                    TOP_MARGIN,
-                    waterfallRows,
-                    safeHeadRow,
-                    0xFF000000u);
+    // Overlay: markers and scale, redrawn only when they change. In spectrum mode the whole
+    // spectrum frame goes into the overlay (opaque) every frame.
+    size_t overlaySize = static_cast<size_t>(sw) * sh;
+    if (g_overlayPixels.size() != overlaySize) {
+        g_overlayPixels.assign(overlaySize, 0u);
+        g_overlayValid = false;
+    }
+    bool overlayChanged = config.showSpectrum || !g_overlayValid || g_overlayWidth != sw ||
+                          g_overlayHeight != sh || g_overlayConfig.showSpectrum ||
+                          !sameOverlayConfig(config, g_overlayConfig);
+    if (overlayChanged) {
+        if (config.showSpectrum) {
+            static std::vector<double> lineMagCopy;
+            {
+                std::lock_guard<std::mutex> specLk(g_spectrumMutex);
+                lineMagCopy.assign(g_lineMagnitudes.begin(), g_lineMagnitudes.end());
             }
-
-            constexpr int kFftSize = 4096;
-            SpectrumSpan scaleSpan = computeSpectrumSpan(
-                kFftSize,
-                config.sampleRate,
-                config.zoom,
-                config.zoomHasCustomCenter,
-                config.zoomCenterHz);
-            double binHz = static_cast<double>(config.sampleRate) / static_cast<double>(kFftSize);
-
-            double referenceFrequencyHz = computeReferenceFrequencyHz(sw, config.sampleRate, config.demodMode);
-            double viewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
-            double viewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
-            int mx = static_cast<int>(std::lround(((referenceFrequencyHz - viewStartHz) / viewSpanHz) * static_cast<double>(sw)));
-            if (mx < 0) mx = 0;
-            if (mx >= sw) mx = sw - 1;
-
-            drawArrowMarkerOnWindow(
-                dest,
-                buf.stride,
-                sw,
-                sh,
-                mx,
-                0,
-                viewStartHz,
-                viewSpanHz,
-                referenceFrequencyHz,
-                config.demodMode);
-
-            if (config.adjustableMarkerEnabled) {
-                drawAdjustableMarker(
-                    dest,
-                    buf.stride,
-                    sw,
-                    sh,
-                    viewStartHz,
-                    viewSpanHz,
-                    config.adjustableMarkerFrequencyHz,
-                    referenceFrequencyHz);
+            static int64_t lastSpectrumRenderNs = 0;
+            double frameDeltaSec = 1.0 / 60.0;
+            if (lastSpectrumRenderNs > 0) {
+                frameDeltaSec = static_cast<double>(frameTimeNanos - lastSpectrumRenderNs) / 1e9;
             }
+            lastSpectrumRenderNs = frameTimeNanos;
+
+            SpectrumRenderParams spectrumParams{
+                sw, sh, kTopMargin,
+                config.sensitivity, config.contrast, config.colorScaleValue,
+                config.spectrumFilled, config.spectrumConstantColor,
+                0.60f, 45.0, frameDeltaSec};
+            if (!drawSpectrumFrame(g_overlayPixels.data(), sw, lineMagCopy, spectrumSmoothedBuffer,
+                                   spectrumDecayBuffer, spectrumParams)) {
+                std::fill(g_overlayPixels.begin(), g_overlayPixels.end(), 0xFF000000u);
+            }
+        } else {
+            std::fill(g_overlayPixels.begin(), g_overlayPixels.end(), 0u);  // transparent
         }
-        ANativeWindow_unlockAndPost(window);
+        drawOverlayMarks(g_overlayPixels.data(), sw, sh, config);
+        g_gl.uploadOverlay(sw, sh, g_overlayPixels.data());
+        g_overlayValid = true;
+        g_overlayConfig = config;
+        g_overlayWidth = sw;
+        g_overlayHeight = sh;
     }
-    if (tempWin) ANativeWindow_release(window);
 
-    int64_t blitNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - blitStart).count();
-    thread_local int64_t profWin = 0; thread_local int profN = 0; thread_local int64_t sB = 0;
-    int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    g_gl.draw(sw, sh, kTopMargin, position, config.showSpectrum ? -1.0 : maxAge);
+    auto swapStart = Clock::now();
+    g_gl.present();
+    auto renderEnd = Clock::now();
+
+    int64_t workNs = std::chrono::duration_cast<std::chrono::nanoseconds>(swapStart - renderStart).count();
+    int64_t swapNs = std::chrono::duration_cast<std::chrono::nanoseconds>(renderEnd - swapStart).count();
+    static int64_t profWin = 0; static int profN = 0; static int64_t sWork = 0, sSwap = 0;
+    int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(renderEnd.time_since_epoch()).count();
     if (profWin == 0) profWin = nowNs;
-    profN++; sB += blitNs;
+    profN++; sWork += workNs; sSwap += swapNs;
     if (nowNs - profWin >= 2000000000LL && profN > 0) {
-        double inv = 1.0 / profN;
-        LOGI("render avg ms: blit=%.3f fps=%.1f", (sB * inv) / 1e6,
-             (profN * 1e9) / (double)(nowNs - profWin));
-        profWin = nowNs; profN = 0; sB = 0;
+        double secs = static_cast<double>(nowNs - profWin) / 1e9;
+        LOGI("gl render: fps=%.1f work=%.3fms swap=%.3fms rows/s=%.1f lead=%.1f rows underruns=%d",
+             profN / secs, (sWork / static_cast<double>(profN)) / 1e6, (sSwap / static_cast<double>(profN)) / 1e6,
+             g_rowsPerSecond.load(std::memory_order_relaxed),
+             static_cast<double>(written - 1) - position, g_pacer.underruns);
+        profWin = nowNs; profN = 0; sWork = 0; sSwap = 0; g_pacer.underruns = 0;
     }
+}
+
+// Render thread only: drops the EGL surface before the window is destroyed.
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_releaseRenderSurface(JNIEnv*, jobject) {
+    g_gl.releaseSurface();
+}
+
+// Render thread only: tears down the whole GL context.
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_releaseRenderer(JNIEnv*, jobject) {
+    g_gl.releaseAll();
+    g_overlayValid = false;
+    g_pacer = ScrollPacer{};
+    g_rowsUploaded = 0;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setNativeSurface(JNIEnv* env, jobject /* this */, jobject surface) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> lock(g_windowMutex);
     setNativeSurfaceLocked(env, surface);
     LOGI("setNativeSurface: %s", surface != nullptr ? "updated" : "cleared");
 }

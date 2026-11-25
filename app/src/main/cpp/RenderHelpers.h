@@ -24,14 +24,3 @@ bool drawSpectrumFrame(
     std::vector<double>& smoothedBuffer,
     std::vector<double>& decayBuffer,
     const SpectrumRenderParams& params);
-
-void blitWaterfallFrame(
-    uint32_t* dest,
-    int stride,
-    const std::vector<uint32_t>& waterfallBuffer,
-    int surfaceWidth,
-    int surfaceHeight,
-    int topMargin,
-    int waterfallRows,
-    int headRow,
-    uint32_t topMarginColor);
