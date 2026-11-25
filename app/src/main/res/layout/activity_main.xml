@@ -8,6 +8,7 @@
     tools:context=".MainActivity">
 
     <ToggleButton
+        style="@style/Widget.BelkaRx.RoundButton"
         android:id="@+id/toggleControlsButton"
         android:layout_width="48dp"
         android:layout_height="48dp"
@@ -17,8 +18,7 @@
         android:textOff="▲"
         android:checked="false"
         android:textSize="14sp"
-        android:padding="0dp"
-        app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
     <LinearLayout
@@ -35,6 +35,7 @@
         app:layout_constraintTop_toTopOf="@+id/toggleControlsButton" />
 
     <ToggleButton
+        style="@style/Widget.BelkaRx.StartStop"
         android:id="@+id/startStopButton"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -83,16 +84,17 @@
             android:gravity="center_vertical">
 
             <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
                 android:id="@+id/swapIQToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:checked="false"
                 android:drawableStart="@drawable/ic_toggle_swap_iq"
-                android:drawablePadding="4dp"
                 android:textOff="Swap I/Q"
                 android:textOn="Swap I/Q" />
 
             <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
                 android:id="@+id/zoomToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -100,12 +102,12 @@
                 android:checked="false"
                 android:contentDescription="Zoom"
                 android:drawableStart="@drawable/ic_toggle_zoom"
-                android:drawablePadding="0dp"
                 android:minWidth="48dp"
                 android:textOff="Zoom"
                 android:textOn="Zoom" />
 
             <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
                 android:id="@+id/showSpectrumToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -113,12 +115,12 @@
                 android:checked="false"
                 android:contentDescription="Spectrum"
                 android:drawableStart="@drawable/ic_toggle_spectrum"
-                android:drawablePadding="0dp"
                 android:minWidth="48dp"
                 android:textOff="Spectrum"
                 android:textOn="Spectrum" />
 
             <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
                 android:id="@+id/markerToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -129,6 +131,7 @@
                 android:textOn="Marker" />
 
             <Button
+                style="@style/Widget.BelkaRx.ModeButton"
                 android:id="@+id/demodModeButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -149,18 +152,19 @@
             android:gravity="center_vertical">
 
             <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
                 android:id="@+id/spectrumFilledToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:checked="false"
                 android:contentDescription="Filled spectrum"
                 android:drawableStart="@drawable/ic_toggle_filled"
-                android:drawablePadding="0dp"
                 android:minWidth="48dp"
                 android:textOff="Fill"
                 android:textOn="Fill" />
 
             <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
                 android:id="@+id/spectrumConstantColorToggle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -168,7 +172,6 @@
                 android:checked="false"
                 android:contentDescription="Monochrome spectrum"
                 android:drawableStart="@drawable/ic_toggle_monochrome"
-                android:drawablePadding="0dp"
                 android:minWidth="48dp"
                 android:textOff="Mono"
                 android:textOn="Mono" />
@@ -226,6 +229,7 @@
             android:text="Sensitivity"
             android:textColor="@android:color/white" />
         <com.google.android.material.slider.Slider
+            style="@style/Widget.BelkaRx.Slider"
             android:id="@+id/sensitivitySeekBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -235,10 +239,7 @@
             android:valueFrom="0"
             android:valueTo="130"
             android:value="75"
-            android:stepSize="1"
-            app:haloRadius="20dp"
-            app:thumbRadius="12dp"
-            app:trackHeight="6dp" />
+            android:stepSize="1" />
     </LinearLayout>
 
     <LinearLayout
@@ -257,6 +258,7 @@
             android:text="Contrast"
             android:textColor="@android:color/white" />
         <com.google.android.material.slider.Slider
+            style="@style/Widget.BelkaRx.Slider"
             android:id="@+id/contrastSeekBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -266,10 +268,7 @@
             android:valueFrom="0"
             android:valueTo="300"
             android:value="100"
-            android:stepSize="1"
-            app:haloRadius="20dp"
-            app:thumbRadius="12dp"
-            app:trackHeight="6dp" />
+            android:stepSize="1" />
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

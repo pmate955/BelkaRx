@@ -312,8 +312,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
         
         // Helper function for layout params
+        // Spinners and sliders sit 8dp in, so with their own 8dp padding they line up with the 16dp button rows.
         fun getDropParams() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, 16, 0, 0)
+            setMargins(dp(8), dp(8), dp(8), 0)
         }
         
         fun getTopParams(marginStart: Int = 0) = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -324,21 +325,19 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply {
-            setMargins(16, 8, 16, 0)
+            setMargins(dp(16), dp(8), dp(16), 0)
         }
 
         fun getSpectrumOptionsInlineParams() = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
-            setMargins(8, 0, 0, 0)
-        }
+        )
 
         fun getTopModeButtonParams() = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply {
-            setMargins(8, 0, 8, 0)
+            setMargins(dp(8), 0, dp(8), 0)
         }
 
         if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
@@ -395,6 +394,27 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
             binding.spectrumOptionsContainer.layoutParams = getSpectrumOptionsParams()
             controlsContainer.addView(binding.spectrumOptionsContainer)
+        }
+
+        distributeEvenly(mainToggleContainer)
+        distributeEvenly(binding.spectrumOptionsContainer)
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    /**
+     * Spreads the buttons of a row across its full width: each keeps its natural width and
+     * gets an equal share of the leftover space, with the same gap between neighbours.
+     * A nested row (the inline spectrum options in landscape) counts as one button per child.
+     */
+    private fun distributeEvenly(row: LinearLayout) {
+        for (i in 0 until row.childCount) {
+            val child = row.getChildAt(i)
+            val params = child.layoutParams as LinearLayout.LayoutParams
+            params.width = ViewGroup.LayoutParams.WRAP_CONTENT
+            params.weight = if (child is LinearLayout) child.childCount.toFloat() else 1f
+            params.setMargins(if (i == 0) 0 else dp(6), 0, 0, 0)
+            child.layoutParams = params
         }
     }
 
