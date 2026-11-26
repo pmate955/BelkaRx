@@ -23,9 +23,8 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
+      # No setup-android step: the ubuntu-latest image ships the Android SDK (ANDROID_HOME),
+      # and Gradle installs the NDK and CMake versions the build needs.
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
