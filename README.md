@@ -19,7 +19,7 @@ Signal processing (FFT, CW decoding) runs in native C++ code. The waterfall is d
 * **Zoom:** **Zoom** shows a 24 kHz wide part of the band instead of the full 48 kHz. Double-tap the waterfall to zoom in around that point, and double-tap again to zoom out.
 * **Sensitivity and contrast:** two sliders set the signal level reference and the dynamic range, so that signals stand out from the noise floor.
 * **Swap I/Q:** fixes a mirrored spectrum if the sound card's left and right channels are swapped.
-* **Waterfall colors:** Classic Rainbow, Light Blue, Grayscale, Cool-Hot, Green Phosphor and LCD.
+* **Waterfall colors:** pick a color scale from the gradient swatches: Classic Rainbow, Light Blue, Grayscale, Cool-Hot, Green Phosphor or LCD. Long-press a swatch to see its name.
 * **CW (Morse) decoder:** decodes Morse at the marker frequency. It shows the text, the speed (WPM) and a signal level graph at the bottom of the waterfall, and the text can be saved to a file. See [CW Decoder](#cw-decoder) below.
 * **More room for the waterfall:** the **▲** button hides the controls, and **▼** shows them again.
 * **Portrait and landscape:** in landscape, the sliders move to the top bar.
@@ -34,7 +34,7 @@ All settings are remembered between sessions.
 4. Tap **Start**. The status line shows the capture format and the sample rate.
 5. Adjust **Sensitivity** and **Contrast** until the signals stand out from the noise.
 
-The audio is captured from the input Android selects. When a USB sound card is plugged in, that is normally the sound card. The device list shows the inputs the phone found.
+There is no input selector: the audio is captured from the input Android selects. When a USB sound card is plugged in, that is the sound card. Otherwise it is the built-in microphone.
 
 ## CW Decoder
 

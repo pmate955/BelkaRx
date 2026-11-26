@@ -1211,6 +1211,23 @@ Java_hu_ha8mz_belkarx_MainActivity_releaseRenderer(JNIEnv*, jobject) {
     g_rowsUploaded = 0;
 }
 
+// Fills `out` with colors of the given waterfall color scale, from weakest to strongest
+// (ARGB, evenly spaced), for the color scale swatches in the UI.
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_getColorScalePreview(JNIEnv* env, jobject, jint scale, jintArray out) {
+    if (out == nullptr) return;
+    int count = env->GetArrayLength(out);
+    if (count <= 0) return;
+    std::vector<jint> colors(count);
+    for (int i = 0; i < count; i++) {
+        double intensity = count > 1 ? 255.0 * i / (count - 1) : 255.0;
+        uint32_t abgr = getColorWithParams(intensity, 100, 100, scale);
+        uint32_t r = abgr & 0xFF, g = (abgr >> 8) & 0xFF, b = (abgr >> 16) & 0xFF;
+        colors[i] = static_cast<jint>(0xFF000000u | (r << 16) | (g << 8) | b);
+    }
+    env->SetIntArrayRegion(out, 0, count, colors.data());
+}
+
 // ============================================================================
 // CW decoder controls (UI thread)
 // ============================================================================

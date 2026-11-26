@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Context
 import android.graphics.PixelFormat
-import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -27,8 +26,9 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.view.ViewGroup
-import android.widget.ArrayAdapter
 import android.widget.Toast
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.text.StaticLayout
 import android.content.res.ColorStateList
 import android.net.Uri
@@ -74,6 +74,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val cwDisplay = StringBuilder()
     private var cwLastTextMs = 0L
     private val cwStatus = FloatArray(6)
+    private var colorScaleIndex = 0
+    private val colorScaleSwatches = mutableListOf<View>()
     private val cwPollHandler = Handler(Looper.getMainLooper())
     private val cwPollRunnable = object : Runnable {
         override fun run() {
@@ -206,8 +208,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             true
         }
         
-        setupDeviceSpinner()
-        setupColorScaleSpinner()
+        setupColorScaleSwatches()
 
         binding.toggleControlsButton.setOnClickListener {
             binding.toggleControlsButton.isChecked = false // Soha ne maradjon benyomva
@@ -345,14 +346,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "Spectrum constant color checkbox changed: $isChecked")
         }
 
-        binding.colorScaleSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                setColorScale(position)             
-                saveSettings()
-                Log.d("BelkaRx", "Color scale selected: $position, isSpectrumFilled=${position == 4}")
-            }
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        }
 
         // Load saved settings
         loadSettings()
@@ -367,7 +360,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setDemodMode(demodModeIndex)
         setSpectrumFilled(binding.spectrumFilledToggle.isChecked)
         setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
-        setColorScale(binding.colorScaleSpinner.selectedItemPosition)
+        setColorScale(colorScaleIndex)
         updateSpectrumOptionControlsEnabled(binding.showSpectrumToggle.isChecked)
         applyCwEnabled(binding.cwToggle.isChecked)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQToggle.isChecked}")
@@ -633,50 +626,51 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun setupDeviceSpinner() {
-        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-        val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        
-        // Show all input devices (AudioRecord UNPROCESSED path is used for capture)
-        val deviceNames = devices.map { device ->
-            val type = when (device.type) {
-                AudioDeviceInfo.TYPE_USB_DEVICE -> "USB Device"
-                AudioDeviceInfo.TYPE_USB_HEADSET -> "USB Headset"
-                AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Built-in Mic"
-                else -> "Device (${device.type})"
+    /**
+     * Waterfall color scale picker: one small swatch per scale showing its gradient (sampled
+     * from the native color scale, weak signals on the left). The selected one has a white
+     * frame; long-press shows the name.
+     */
+    private fun setupColorScaleSwatches() {
+        val row = binding.colorScaleRow
+        row.removeAllViews()
+        colorScaleSwatches.clear()
+        val preview = IntArray(16)
+        COLOR_SCALE_NAMES.forEachIndexed { index, name ->
+            getColorScalePreview(index, preview)
+            val swatch = View(this).apply {
+                background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, preview.copyOf()).apply {
+                    cornerRadius = dp(6).toFloat()
+                }
+                contentDescription = "$name color scale"
+                tooltipText = name
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { selectColorScale(index, fromUser = true) }
             }
-            "${device.productName} [$type]"
+            row.addView(swatch, LinearLayout.LayoutParams(0, dp(26), 1f).apply {
+                marginStart = if (index == 0) 0 else dp(6)
+            })
+            colorScaleSwatches.add(swatch)
         }
-        
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, deviceNames)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.deviceSpinner.adapter = adapter
-        
-        // Set default selection to "Other (25)" device if available
-        val otherIndex = devices.indexOfFirst { it.type == 25 }
-        if (otherIndex >= 0) {
-            binding.deviceSpinner.setSelection(otherIndex)
-        }
-        
-        Log.i("BelkaRx", "Found ${devices.size} audio input devices")
-        devices.forEachIndexed { index, device ->
-            Log.i("BelkaRx", "Device $index: ${device.productName} (type=${device.type}, id=${device.id})")
-        }
+        selectColorScale(colorScaleIndex, fromUser = false)
     }
 
-    private fun setupColorScaleSpinner() {
-        val colorScales = arrayOf(
-            "Classic Rainbow",
-            "Light Blue",
-            "Grayscale",
-            "Cool-Hot",
-            "Green Phosphor",
-            "LCD"
-        )
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, colorScales)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.colorScaleSpinner.adapter = adapter
-        binding.colorScaleSpinner.setSelection(0)  // Default to Classic Rainbow
+    private fun selectColorScale(index: Int, fromUser: Boolean) {
+        colorScaleIndex = index.coerceIn(0, COLOR_SCALE_NAMES.lastIndex)
+        colorScaleSwatches.forEachIndexed { i, swatch ->
+            val selected = i == colorScaleIndex
+            swatch.isSelected = selected  // TalkBack reads "selected"
+            (swatch.background as? GradientDrawable)?.setStroke(
+                dp(if (selected) 2 else 1),
+                if (selected) Color.WHITE else 0x66FFFFFF,
+            )
+        }
+        setColorScale(colorScaleIndex)
+        if (fromUser) {
+            saveSettings()
+            Log.d("BelkaRx", "Color scale selected: ${COLOR_SCALE_NAMES[colorScaleIndex]}")
+        }
     }
 
     private fun checkPermission(): Boolean {
@@ -689,26 +683,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun startRecording() {
         Log.i("BelkaRx", "startRecording() called")
-        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-        val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        
-        val selectedDeviceIndex = binding.deviceSpinner.selectedItemPosition
-        
-        if (selectedDeviceIndex < 0 || selectedDeviceIndex >= devices.size) {
-            Toast.makeText(this, "Nincs kiválasztott eszköz", Toast.LENGTH_SHORT).show()
-            return
-        }
-        
-        val selectedDevice = devices[selectedDeviceIndex]
-
+        // Capture always uses the input Android routes to: a connected USB sound card, otherwise
+        // the built-in microphone. (There used to be a device list, but it never changed the route.)
         if (!checkPermission()) return
 
         binding.statusText.text = "Status: Starting AudioRecord UNPROCESSED capture..."
         
         try {
-            if (!tryAudioRecordUnprocessed(selectedDevice)) {
+            if (!tryAudioRecordUnprocessed()) {
                 binding.statusText.text = "Status: Error - Failed to start AudioRecord UNPROCESSED"
-                Log.e("BelkaRx", "Failed to start AudioRecord UNPROCESSED for device ${selectedDevice.id}")
+                Log.e("BelkaRx", "Failed to start AudioRecord UNPROCESSED")
                 return
             }
         } catch (e: Exception) {
@@ -720,7 +704,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     /**
      * Try to capture stereo audio using AudioRecord with UNPROCESSED source (API 24+)
      */
-    private fun tryAudioRecordUnprocessed(device: AudioDeviceInfo): Boolean {
+    private fun tryAudioRecordUnprocessed(): Boolean {
         return try {
             val sampleRate = 192000
             val channelConfig = AudioFormat.CHANNEL_IN_STEREO
@@ -981,8 +965,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putInt("demodMode", demodModeIndex)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
-        editor.putInt("colorScale", binding.colorScaleSpinner.selectedItemPosition)
-        editor.putInt("deviceSelection", binding.deviceSpinner.selectedItemPosition)
+        editor.putInt("colorScale", colorScaleIndex)
+        editor.remove("deviceSelection")  // left over from the removed device list
         editor.apply()
         Log.d("BelkaRx", "Settings saved")
     }
@@ -999,7 +983,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
         val colorScale = prefs.getInt("colorScale", 0)
-        val deviceSelection = prefs.getInt("deviceSelection", 0)
         
         binding.sensitivitySeekBar.value = sensitivity.toFloat()
         binding.contrastSeekBar.value = contrast.toFloat()
@@ -1016,13 +999,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         updateDemodModeButtonText()
         binding.spectrumFilledToggle.isChecked = spectrumFilled
         binding.spectrumConstantColorToggle.isChecked = spectrumConstantColor
-        binding.colorScaleSpinner.setSelection(colorScale.coerceIn(0, binding.colorScaleSpinner.count - 1))
-        
-        // Set device selection if it's valid
-        if (deviceSelection >= 0 && deviceSelection < binding.deviceSpinner.count) {
-            binding.deviceSpinner.setSelection(deviceSelection)
-        }
-        
+        selectColorScale(colorScale, fromUser = false)
+
+
         Log.d("BelkaRx", "Settings loaded: sensitivity=$sensitivity, contrast=$contrast, swapIQ=$swapIQ, zoom=$zoom, colorScale=$colorScale")
     }
 
@@ -1092,6 +1071,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun cwGetStatus(out: FloatArray)
     private external fun setCwThresholdDb(db: Float)
     private external fun setCwAutoThreshold(enabled: Boolean)
+    private external fun getColorScalePreview(scale: Int, out: IntArray)
     private external fun cwGetScope(out: FloatArray, total: LongArray): Int
     private external fun setSurfaceSize(width: Int, height: Int)
     private external fun setSensitivity(value: Int)
@@ -1130,6 +1110,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         private const val HOP_SIZE = 2048          // 50% overlap; must match kHopSize in native-lib.cpp
         private const val READ_CHUNK_FRAMES = 1024 // stereo frames per AudioRecord.read()
 
+        private val COLOR_SCALE_NAMES = arrayOf(
+            "Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot", "Green Phosphor", "LCD",
+        )
         private const val CW_POLL_INTERVAL_MS = 100L  // text and status; the graph pulls its own data
         private const val CW_NEW_LINE_PAUSE_MS = 10_000L  // a pause this long starts a new log line
         private const val CW_DISPLAY_CHARS = 2000

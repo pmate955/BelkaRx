@@ -304,19 +304,17 @@
         android:orientation="horizontal"
         tools:ignore="MissingConstraints">
 
-        <Spinner
-            android:id="@+id/deviceSpinner"
+        <!-- No input device selector: capture always uses the input Android routes to. -->
+        <!-- Waterfall color scales: one gradient swatch per scale, filled in from code. -->
+        <LinearLayout
+            android:id="@+id/colorScaleRow"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="48dp"
             android:layout_weight="1"
-            android:layout_marginEnd="8dp" />
-
-        <Spinner
-            android:id="@+id/colorScaleSpinner"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp" />
     </LinearLayout>
 
     <LinearLayout
