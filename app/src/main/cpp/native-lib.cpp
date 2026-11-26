@@ -21,6 +21,7 @@
 #include "RenderHelpers.h"
 #include "GlWaterfall.h"
 #include "CwDecoder.h"
+#include "RttyDecoder.h"
 
 #define LOG_TAG "BelkaRx-Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -42,7 +43,11 @@ bool zoomCenteredFromTouch = false;
 double zoomCenterFrequencyHz = 0.0;
 bool adjustableMarkerEnabled = false;
 bool cwDecoderEnabled = false;   // decode Morse at the adjustable marker frequency
-int overlayBottomInset = 0;      // pixels at the bottom covered by the CW text strip
+bool rttyDecoderEnabled = false; // decode RTTY centered on the adjustable marker frequency
+float rttyBaud = 50.0f;
+float rttyShiftHz = 450.0f;
+bool rttyInvert = false;
+int overlayBottomInset = 0;      // pixels at the bottom covered by the decoder strip
 double adjustableMarkerFrequencyHz = 0.0;
 int demodMode = 0;  // 0=AM, 1=USB, 2=LSB
 bool showSpectrumEnabled = false;
@@ -90,6 +95,8 @@ static std::shared_ptr<WaterfallRing> loadRing() {
 
 // CW decoder: fed on the audio thread, polled from the UI thread (takeText/status are thread-safe).
 static CwDecoder g_cwDecoder;
+// RTTY decoder: same threading as the CW decoder.
+static RttyDecoder g_rttyDecoder;
 
 // Smoothed power per FFT bin (natural FFT order), used to snap the marker onto a nearby signal.
 static std::mutex g_snapMutex;
@@ -118,7 +125,16 @@ struct RenderConfigSnapshot {
     bool spectrumConstantColor;
     bool cwEnabled;
     int bottomInset;
+    bool rttyEnabled;
+    float rttyBaud;
+    float rttyShiftHz;
+    bool rttyInvert;
 };
+
+// A decoder (CW or RTTY) is on: zoom uses the narrow window around the marker.
+bool decoderZoom(const RenderConfigSnapshot& config) {
+    return config.cwEnabled || config.rttyEnabled;
+}
 
 int getWaterfallRows(int height) {
     return height > kTopMargin ? (height - kTopMargin) : 0;
@@ -202,7 +218,11 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         isSpectrumFilled,
         isSpectrumConstantColor,
         cwDecoderEnabled,
-        overlayBottomInset};
+        overlayBottomInset,
+        rttyDecoderEnabled,
+        rttyBaud,
+        rttyShiftHz,
+        rttyInvert};
 }
 
 bool sameRenderConfig(const RenderConfigSnapshot& a, const RenderConfigSnapshot& b) {
@@ -280,7 +300,7 @@ void computeCurrentViewWindowHz(double& outViewStartHz, double& outViewSpanHz) {
         zoomEnabled,
         zoomCenteredFromTouch,
         zoomCenterFrequencyHz,
-        cwDecoderEnabled);
+        cwDecoderEnabled || rttyDecoderEnabled);
     double binHz = static_cast<double>(currentSampleRate) / static_cast<double>(kFftSize);
     outViewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
     outViewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
@@ -413,8 +433,8 @@ extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
-    // In CW mode, zoom in around the decoder's marker instead of the fixed IF frequency.
-    zoomCenteredFromTouch = zoomEnabled && cwDecoderEnabled && adjustableMarkerEnabled;
+    // In CW / RTTY mode, zoom in around the decoder's marker instead of the fixed IF frequency.
+    zoomCenteredFromTouch = zoomEnabled && (cwDecoderEnabled || rttyDecoderEnabled) && adjustableMarkerEnabled;
     if (zoomCenteredFromTouch) zoomCenterFrequencyHz = adjustableMarkerFrequencyHz;
     LOGI("setZoom: %s", zoomEnabled ? "true" : "false (±24kHz @DC)");
 }
@@ -860,6 +880,16 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     }
     cwWasRunning = cwRunning;
 
+    thread_local bool rttyWasRunning = false;
+    bool rttyRunning = config.rttyEnabled && config.adjustableMarkerEnabled;
+    if (rttyRunning) {
+        if (!rttyWasRunning) g_rttyDecoder.reset();
+        g_rttyDecoder.configure(config.sampleRate, config.adjustableMarkerFrequencyHz, config.rttyBaud,
+                                config.rttyShiftHz, config.rttyInvert);
+        g_rttyDecoder.process(&real[fftSize - kHopSize], &imag[fftSize - kHopSize], kHopSize);
+    }
+    rttyWasRunning = rttyRunning;
+
     auto fftStart = Clock::now();
     fft(real, imag);
     fftNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - fftStart).count();
@@ -878,7 +908,7 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     const int width = ring->width;
 
     SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter,
-                                            config.zoomCenterHz, config.cwEnabled);
+                                            config.zoomCenterHz, decoderZoom(config));
 
     double minMag = 1e9, maxMag = -1e9;
     thread_local std::vector<double> lineMags;
@@ -1045,14 +1075,16 @@ bool sameOverlayConfig(const RenderConfigSnapshot& a, const RenderConfigSnapshot
            a.zoomCenterHz == b.zoomCenterHz && a.demodMode == b.demodMode &&
            a.adjustableMarkerEnabled == b.adjustableMarkerEnabled &&
            a.adjustableMarkerFrequencyHz == b.adjustableMarkerFrequencyHz &&
-           a.showSpectrum == b.showSpectrum && a.cwEnabled == b.cwEnabled && a.bottomInset == b.bottomInset;
+           a.showSpectrum == b.showSpectrum && a.cwEnabled == b.cwEnabled && a.bottomInset == b.bottomInset &&
+           a.rttyEnabled == b.rttyEnabled && a.rttyBaud == b.rttyBaud && a.rttyShiftHz == b.rttyShiftHz &&
+           a.rttyInvert == b.rttyInvert;
 }
 
 // Draws the frequency scale, the demod marker and the adjustable marker into `dest`.
 void drawOverlayMarks(uint32_t* dest, int width, int height, const RenderConfigSnapshot& config) {
     constexpr int kFftSize = 4096;
     SpectrumSpan scaleSpan = computeSpectrumSpan(
-        kFftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz, config.cwEnabled);
+        kFftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz, decoderZoom(config));
     double binHz = static_cast<double>(config.sampleRate) / static_cast<double>(kFftSize);
 
     double referenceFrequencyHz = computeReferenceFrequencyHz(width, config.sampleRate, config.demodMode);
@@ -1063,18 +1095,32 @@ void drawOverlayMarks(uint32_t* dest, int width, int height, const RenderConfigS
     if (mx >= width) mx = width - 1;
 
     drawArrowMarkerOnWindow(dest, width, width, height, mx, 0, viewStartHz, viewSpanHz, referenceFrequencyHz, config.demodMode);
-    // Keep the marker and its label above the CW text strip.
+    // Keep the marker and its label above the decoder text strip.
     int markerHeight = std::max(kTopMargin + 40, height - config.bottomInset);
-    if (config.adjustableMarkerEnabled && config.cwEnabled && !config.showSpectrum && viewSpanHz > 1e-9) {
-        // Translucent green band showing the decoder's 100 Hz channel.
-        constexpr double kHalfBandwidthHz = 50.0;
-        constexpr uint32_t kBandColor = 0x5000FF40u;  // ABGR: green, ~30% opacity
-        int x1 = static_cast<int>(std::floor((config.adjustableMarkerFrequencyHz - kHalfBandwidthHz - viewStartHz) / viewSpanHz * width));
-        int x2 = static_cast<int>(std::ceil((config.adjustableMarkerFrequencyHz + kHalfBandwidthHz - viewStartHz) / viewSpanHz * width));
+    // Translucent band over a decoder channel (centerHz +- halfWidthHz).
+    auto drawBand = [&](double centerHz, double halfWidthHz, uint32_t color) {
+        if (centerHz + halfWidthHz < viewStartHz || centerHz - halfWidthHz > viewStartHz + viewSpanHz) return;
+        int x1 = static_cast<int>(std::floor((centerHz - halfWidthHz - viewStartHz) / viewSpanHz * width));
+        int x2 = static_cast<int>(std::ceil((centerHz + halfWidthHz - viewStartHz) / viewSpanHz * width));
         x1 = std::max(0, x1);
         x2 = std::min(width - 1, std::max(x2, x1 + 2));
         for (int y = kTopMargin; y < markerHeight; y++) {
-            for (int x = x1; x <= x2; x++) dest[static_cast<size_t>(y) * width + x] = kBandColor;
+            for (int x = x1; x <= x2; x++) dest[static_cast<size_t>(y) * width + x] = color;
+        }
+    };
+    if (config.adjustableMarkerEnabled && !config.showSpectrum && viewSpanHz > 1e-9) {
+        if (config.cwEnabled) {
+            // The CW decoder's 100 Hz channel, green (ABGR, ~30% opacity).
+            drawBand(config.adjustableMarkerFrequencyHz, 50.0, 0x5000FF40u);
+        } else if (config.rttyEnabled) {
+            // RTTY mark (green) and space (orange) filters, about one baud wide each, on both
+            // sides of the marker. Mark is the higher frequency unless inverted.
+            double half = 0.5 * config.rttyShiftHz;
+            double markHz = config.adjustableMarkerFrequencyHz + (config.rttyInvert ? -half : half);
+            double spaceHz = config.adjustableMarkerFrequencyHz + (config.rttyInvert ? half : -half);
+            double bandHalfWidth = 0.75 * config.rttyBaud;
+            drawBand(markHz, bandHalfWidth, 0x5000FF40u);
+            drawBand(spaceHz, bandHalfWidth, 0x500090FFu);
         }
     }
     if (config.adjustableMarkerEnabled) {
@@ -1243,26 +1289,124 @@ Java_hu_ha8mz_belkarx_MainActivity_setCwEnabled(JNIEnv*, jobject, jboolean enabl
     LOGI("setCwEnabled: %s", cwDecoderEnabled ? "true" : "false");
 }
 
+// ============================================================================
+// RTTY decoder controls (UI thread)
+// ============================================================================
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setRttyEnabled(JNIEnv*, jobject, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    rttyDecoderEnabled = (enabled == JNI_TRUE);
+    // As with CW: with zoom already on, the narrow zoom window is centered on the marker.
+    if (rttyDecoderEnabled && zoomEnabled && adjustableMarkerEnabled && !zoomCenteredFromTouch) {
+        zoomCenteredFromTouch = true;
+        zoomCenterFrequencyHz = adjustableMarkerFrequencyHz;
+    }
+    LOGI("setRttyEnabled: %s", rttyDecoderEnabled ? "true" : "false");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setRttyParams(JNIEnv*, jobject, jfloat baud, jfloat shiftHz, jboolean invert) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    rttyBaud = std::clamp(static_cast<float>(baud), 10.0f, 300.0f);
+    rttyShiftHz = std::clamp(static_cast<float>(shiftHz), 20.0f, 1000.0f);
+    rttyInvert = (invert == JNI_TRUE);
+    LOGI("setRttyParams: %.2f Bd, %.0f Hz shift, %s", rttyBaud, rttyShiftHz, rttyInvert ? "inverted" : "normal");
+}
+
+// Decoded text since the previous call.
+extern "C" JNIEXPORT jstring JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_rttyPollText(JNIEnv* env, jobject) {
+    std::string text = g_rttyDecoder.takeText();
+    return env->NewStringUTF(text.c_str());
+}
+
+// Fills out[0..2] with SNR (dB), signal present / squelch open (0/1), current bit is mark (0/1).
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_rttyGetStatus(JNIEnv* env, jobject, jfloatArray out) {
+    if (out == nullptr || env->GetArrayLength(out) < 3) return;
+    RttyStatus status = g_rttyDecoder.status();
+    jfloat values[3] = {status.snrDb, status.signal ? 1.0f : 0.0f, status.mark ? 1.0f : 0.0f};
+    env->SetFloatArrayRegion(out, 0, 3, values);
+}
+
+// Copies the newest tuning scope points (x = mark, y = space, interleaved, oldest first) into
+// `out`. Returns the number of points (pairs) copied.
+extern "C" JNIEXPORT jint JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_rttyGetScope(JNIEnv* env, jobject, jfloatArray out) {
+    if (out == nullptr) return 0;
+    int capacity = std::min(static_cast<int>(env->GetArrayLength(out)) / 2, RttyDecoder::kScopePoints);
+    thread_local std::vector<float> points;
+    points.resize(2 * RttyDecoder::kScopePoints);
+    int count = g_rttyDecoder.copyScope(points.data(), capacity);
+    env->SetFloatArrayRegion(out, 0, 2 * count, points.data());
+    return count;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setOverlayBottomInset(JNIEnv*, jobject, jint pixels) {
     std::lock_guard<std::mutex> lock(g_mutex);
     overlayBottomInset = pixels > 0 ? pixels : 0;
 }
 
-// Moves the marker onto the strongest signal within +-100 Hz (sub-bin accurate).
-// Returns false if there is no spectrum yet.
+// RTTY: moves the marker to the center of the mark/space pair. Searches +-150 Hz in 2 Hz steps for
+// the center whose two tones (center +- shift/2) hold the most power, with the power read from
+// the smoothed spectrum by linear interpolation between bins.
+static jboolean snapMarkerToRttyPair(double markerHz, int sampleRate, double shiftHz) {
+    constexpr int kFftSize = 4096;
+    constexpr double kSearchHz = 150.0;
+    constexpr double kStepHz = 2.0;
+    double binHz = static_cast<double>(sampleRate) / kFftSize;
+    double bestHz = markerHz;
+    {
+        std::lock_guard<std::mutex> snapLock(g_snapMutex);
+        if (g_snapPower.size() != static_cast<size_t>(kFftSize)) return JNI_FALSE;
+        auto powerAt = [binHz](double hz) {
+            double bin = hz / binHz;
+            double base = std::floor(bin);
+            double frac = bin - base;
+            auto at = [](long logicalBin) {
+                long index = ((logicalBin % kFftSize) + kFftSize) % kFftSize;
+                return static_cast<double>(g_snapPower[index]);
+            };
+            long k = static_cast<long>(base);
+            return at(k) * (1.0 - frac) + at(k + 1) * frac;
+        };
+        double bestScore = -1.0;
+        for (double offset = -kSearchHz; offset <= kSearchHz + 1e-9; offset += kStepHz) {
+            double center = markerHz + offset;
+            double score = powerAt(center - 0.5 * shiftHz) + powerAt(center + 0.5 * shiftHz);
+            if (score > bestScore) {
+                bestScore = score;
+                bestHz = center;
+            }
+        }
+        if (bestScore <= 0.0) return JNI_FALSE;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    adjustableMarkerFrequencyHz = bestHz;
+    LOGI("snapMarkerToPeak (RTTY %.0f Hz shift): %.1f Hz -> %.1f Hz", shiftHz, markerHz, bestHz);
+    return JNI_TRUE;
+}
+
+// Moves the marker onto the strongest signal within +-100 Hz (sub-bin accurate), or in RTTY mode
+// onto the center of the strongest mark/space pair. Returns false if there is no spectrum yet.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_snapMarkerToPeak(JNIEnv*, jobject) {
     constexpr int kFftSize = 4096;
     constexpr double kSearchHz = 100.0;
     double markerHz;
     int sampleRate;
+    bool rtty;
+    double shiftHz;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!adjustableMarkerEnabled || currentSampleRate <= 0) return JNI_FALSE;
         markerHz = adjustableMarkerFrequencyHz;
         sampleRate = currentSampleRate;
+        rtty = rttyDecoderEnabled;
+        shiftHz = rttyShiftHz;
     }
+    if (rtty) return snapMarkerToRttyPair(markerHz, sampleRate, shiftHz);
     double binHz = static_cast<double>(sampleRate) / kFftSize;
     int center = static_cast<int>(std::lround(markerHz / binHz));
     int reach = std::max(1, static_cast<int>(std::ceil(kSearchHz / binHz)));

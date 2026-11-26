@@ -18,6 +18,7 @@ import android.content.res.Configuration
 import android.util.Log
 import android.view.Choreographer
 import android.view.GestureDetector
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -25,11 +26,13 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import android.view.ViewGroup
 import android.widget.Toast
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.StaticLayout
 import android.content.res.ColorStateList
 import android.net.Uri
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,6 +42,7 @@ import java.util.Locale
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.slider.Slider
 import hu.ha8mz.belkarx.databinding.ActivityMainBinding
 import java.util.concurrent.CountDownLatch
@@ -68,12 +72,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var longPressDownY = 0f
     private val markerLongPressTimeoutMs = 1000L
 
-    // CW decoder: full log (with a timestamp at the start of each transmission) for saving,
-    // and the plain text tail shown in the strip.
-    private val cwLog = StringBuilder()
-    private val cwDisplay = StringBuilder()
-    private var cwLastTextMs = 0L
+    // Decoded text of the CW and RTTY decoders (log for saving, tail shown in the strip).
+    private lateinit var cwOutput: DecoderText
+    private lateinit var rttyOutput: DecoderText
+    private var pendingSaveOutput: DecoderText? = null
     private val cwStatus = FloatArray(6)
+    private val rttyStatus = FloatArray(3)
+    private var rttyBaudIndex = DEFAULT_RTTY_BAUD_INDEX
+    private var rttyShiftIndex = DEFAULT_RTTY_SHIFT_INDEX
+    private val rttyBaudSegments = mutableListOf<TextView>()
+    private val rttyShiftSegments = mutableListOf<TextView>()
     private var colorScaleIndex = 0
     private val colorScaleSwatches = mutableListOf<View>()
     private val cwPollHandler = Handler(Looper.getMainLooper())
@@ -83,17 +91,25 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             cwPollHandler.postDelayed(this, CW_POLL_INTERVAL_MS)
         }
     }
-    private val saveCwLogLauncher =
+    private val rttyPollRunnable = object : Runnable {
+        override fun run() {
+            pollRttyDecoder()
+            cwPollHandler.postDelayed(this, CW_POLL_INTERVAL_MS)
+        }
+    }
+    private val saveLogLauncher =
         registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-            if (uri != null) writeCwLog(uri)
+            val output = pendingSaveOutput
+            pendingSaveOutput = null
+            if (uri != null && output != null) writeLog(uri, output)
         }
     private val markerLongPressMoveToleranceMultiplier = 3f
     private val markerLongPressRunnable = Runnable {
-        // In CW mode the decoder needs the marker: a long press (easy to do by accident while
-        // tuning) must not turn it off, which would also stop the decoder. The press simply
+        // In CW / RTTY mode the decoder needs the marker: a long press (easy to do by accident
+        // while tuning) must not turn it off, which would also stop the decoder. The press simply
         // keeps acting as a marker drag, and the marker still snaps to the signal on release.
-        if (binding.cwToggle.isChecked) {
-            Log.d("BelkaRx", "Waterfall long-press ignored in CW mode")
+        if (decoderOn()) {
+            Log.d("BelkaRx", "Waterfall long-press ignored in decoder mode")
             return@Runnable
         }
         longPressTriggered = true
@@ -137,6 +153,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun onDestroy() {
         cwPollHandler.removeCallbacks(cwPollRunnable)
+        cwPollHandler.removeCallbacks(rttyPollRunnable)
         stopVsyncRenderLoop()
         renderHandler?.post { releaseRenderer() }
         renderThread?.quitSafely()
@@ -154,6 +171,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         prefs = getSharedPreferences("BelkaRxSettings", Context.MODE_PRIVATE)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        cwOutput = DecoderText("CW", binding.cwText, binding.cwTextScroll) {
+            if (cwStatus[0] > 0f) String.format(Locale.US, "Last speed: %.0f WPM\n", cwStatus[0]) else ""
+        }
+        rttyOutput = DecoderText("RTTY", binding.rttyText, binding.rttyTextScroll) {
+            String.format(
+                Locale.US, "Settings: %s Bd, %d Hz shift%s\n",
+                RTTY_BAUD_LABELS[rttyBaudIndex], RTTY_SHIFTS[rttyShiftIndex],
+                if (binding.rttyInvertToggle.isChecked) ", inverted" else "",
+            )
+        }
         
         // Hide the action bar to save space
         supportActionBar?.hide()
@@ -187,9 +214,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL -> {
                     longPressHandler.removeCallbacks(markerLongPressRunnable)
-                    // With the CW decoder on, releasing the marker snaps it onto the nearest signal.
+                    // With a decoder on, releasing the marker snaps it onto the nearest signal
+                    // (in RTTY mode: the center of the nearest mark/space pair).
                     if (event.actionMasked == MotionEvent.ACTION_UP && !longPressTriggered &&
-                        binding.markerToggle.isChecked && binding.cwToggle.isChecked) {
+                        binding.markerToggle.isChecked && decoderOn()) {
                         snapMarkerToPeak()
                     }
                 }
@@ -272,9 +300,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.markerToggle.setOnCheckedChangeListener { _, isChecked ->
             setAdjustableMarkerEnabled(isChecked)
-            // The CW decoder listens at the marker, so it cannot run without one.
+            // The decoders listen at the marker, so they cannot run without one.
             if (!isChecked && binding.cwToggle.isChecked) {
                 binding.cwToggle.isChecked = false
+            }
+            if (!isChecked && binding.rttyToggle.isChecked) {
+                binding.rttyToggle.isChecked = false
             }
             saveSettings()
             Log.d("BelkaRx", "Marker checkbox changed: $isChecked")
@@ -286,14 +317,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.d("BelkaRx", "CW decoder changed: $isChecked")
         }
 
-        // Re-wrap the CW text whenever its width changes (first layout, rotation).
-        binding.cwText.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
-            if (right - left != oldRight - oldLeft) binding.cwText.post { showCwText() }
+        binding.rttyToggle.setOnCheckedChangeListener { _, isChecked ->
+            applyRttyEnabled(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "RTTY decoder changed: $isChecked")
         }
 
-        binding.cwPanel.addOnLayoutChangeListener { panel, _, _, _, _, _, _, _, _ ->
-            setOverlayBottomInset(if (panel.visibility == View.VISIBLE) panel.height else 0)
-        }
+        binding.cwPanel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateOverlayInset() }
+        binding.rttyPanel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateOverlayInset() }
 
         binding.cwScope.source = { levels, total -> cwGetScope(levels, total) }
         binding.cwScope.onAutoChanged = { enabled ->
@@ -312,19 +343,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.cwClearButton.setOnClickListener {
             cwPollText()  // drop anything not shown yet
-            cwLog.setLength(0)
-            cwDisplay.setLength(0)
-            showCwText()
+            cwOutput.clear()
         }
+        binding.cwSaveButton.setOnClickListener { saveLog(cwOutput) }
 
-        binding.cwSaveButton.setOnClickListener {
-            if (cwLog.isEmpty()) {
-                Toast.makeText(this, "Nothing decoded yet", Toast.LENGTH_SHORT).show()
-            } else {
-                val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-                saveCwLogLauncher.launch("BelkaRx-CW-$stamp.txt")
-            }
-        }
+        setupRttyControls()
 
         binding.demodModeButton.setOnClickListener {
             demodModeIndex = (demodModeIndex + 1) % demodModeLabels.size
@@ -363,6 +386,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setColorScale(colorScaleIndex)
         updateSpectrumOptionControlsEnabled(binding.showSpectrumToggle.isChecked)
         applyCwEnabled(binding.cwToggle.isChecked)
+        applyRttyEnabled(binding.rttyToggle.isChecked)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQToggle.isChecked}")
 
 
@@ -380,7 +404,19 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
+    private fun decoderOn() = binding.cwToggle.isChecked || binding.rttyToggle.isChecked
+
+    /** The waterfall overlay keeps the marker above the visible decoder strip. */
+    private fun updateOverlayInset() {
+        val panel = listOf(binding.cwPanel, binding.rttyPanel).firstOrNull { it.visibility == View.VISIBLE }
+        setOverlayBottomInset(panel?.height ?: 0)  // a panel just shown updates again after layout
+    }
+
     private fun applyCwEnabled(enabled: Boolean) {
+        // One decoder at a time: they share the marker and the strip at the bottom.
+        if (enabled && binding.rttyToggle.isChecked) {
+            binding.rttyToggle.isChecked = false
+        }
         // The decoder listens at the marker, so turning CW on also turns the marker on.
         if (enabled && !binding.markerToggle.isChecked) {
             binding.markerToggle.isChecked = true
@@ -388,7 +424,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setCwEnabled(enabled)
         binding.cwPanel.visibility = if (enabled) View.VISIBLE else View.GONE
         binding.cwScope.running = enabled
-        if (!enabled) setOverlayBottomInset(0)  // when visible, the layout listener sets it
+        updateOverlayInset()
         cwPollHandler.removeCallbacks(cwPollRunnable)
         if (enabled) {
             cwPollHandler.post(cwPollRunnable)
@@ -399,24 +435,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     private fun pollCwDecoder() {
         val text = cwPollText()
-        if (text.isNotEmpty()) {
-            val now = System.currentTimeMillis()
-            if (cwLog.isEmpty() || now - cwLastTextMs > CW_NEW_LINE_PAUSE_MS) {
-                if (cwLog.isNotEmpty()) cwLog.append('\n')
-                cwLog.append('[')
-                    .append(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(now)))
-                    .append("] ")
-                if (cwDisplay.isNotEmpty() && cwDisplay.last() != ' ') cwDisplay.append(' ')
-            }
-            cwLog.append(text)
-            cwDisplay.append(text)
-            if (cwDisplay.length > CW_DISPLAY_CHARS) {
-                // Drop a big chunk at once, so the wrapped lines reflow only rarely.
-                cwDisplay.delete(0, cwDisplay.length - CW_DISPLAY_CHARS / 2)
-            }
-            cwLastTextMs = now
-            showCwText()
-        }
+        if (text.isNotEmpty()) cwOutput.append(text)
 
         cwGetStatus(cwStatus)
         binding.cwScope.cutDb = cwStatus[4]
@@ -431,46 +450,218 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.cwKeyIndicator.backgroundTintList = ColorStateList.valueOf(color)
     }
 
-    // Shows the newest decoded text, word-wrapped, in the strip's fixed number of lines.
-    // The wrapping is computed here (same paint and width as the view) and only the last lines
-    // are set as text, so nothing has to be scrolled afterwards; scrolling one frame later made
-    // the text jump whenever a new line started.
-    private fun showCwText() {
-        val view = binding.cwText
-        val width = view.width - view.totalPaddingLeft - view.totalPaddingRight
-        if (width <= 0) {
-            // Not laid out yet (panel just shown or rotated): try again after layout.
-            view.text = cwDisplay
-            if (view.visibility == View.VISIBLE && binding.cwPanel.visibility == View.VISIBLE) {
-                view.post { if (view.width > 0) showCwText() }
-            }
-            return
+    private fun applyRttyEnabled(enabled: Boolean) {
+        // One decoder at a time: they share the marker and the strip at the bottom.
+        if (enabled && binding.cwToggle.isChecked) {
+            binding.cwToggle.isChecked = false
         }
-        val layout = StaticLayout.Builder.obtain(cwDisplay, 0, cwDisplay.length, view.paint, width)
-            .setIncludePad(view.includeFontPadding)
-            .setBreakStrategy(view.breakStrategy)
-            .setHyphenationFrequency(view.hyphenationFrequency)
-            .setLineSpacing(view.lineSpacingExtra, view.lineSpacingMultiplier)
-            .build()
-        val firstLine = maxOf(0, layout.lineCount - view.maxLines)
-        view.text = cwDisplay.substring(layout.getLineStart(firstLine))
+        // The decoder is centered on the marker, so turning RTTY on also turns the marker on.
+        if (enabled && !binding.markerToggle.isChecked) {
+            binding.markerToggle.isChecked = true
+        }
+        setRttyEnabled(enabled)
+        binding.rttyPanel.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.rttyScope.running = enabled
+        updateOverlayInset()
+        cwPollHandler.removeCallbacks(rttyPollRunnable)
+        if (enabled) {
+            cwPollHandler.post(rttyPollRunnable)
+        } else {
+            binding.rttySignalIndicator.backgroundTintList = ColorStateList.valueOf(CW_COLOR_IDLE)
+        }
     }
 
-    private fun writeCwLog(uri: Uri) {
+    /** Baud rate and shift choices, Invert, the tuning scope source, Clear and Save. */
+    private fun setupRttyControls() {
+        buildSegments(binding.rttyBaudRow, RTTY_BAUD_LABELS, RTTY_BAUD_LABELS.map { "$it baud" }, rttyBaudSegments) {
+            rttyBaudIndex = it
+            applyRttyParams()
+            saveSettings()
+        }
+        buildSegments(
+            binding.rttyShiftRow, RTTY_SHIFTS.map { it.toString() }.toTypedArray(),
+            RTTY_SHIFTS.map { "$it hertz shift" }, rttyShiftSegments,
+        ) {
+            rttyShiftIndex = it
+            applyRttyParams()
+            saveSettings()
+        }
+        binding.rttyInvertToggle.setOnCheckedChangeListener { _, _ ->
+            applyRttyParams()
+            saveSettings()
+        }
+        binding.rttyScope.source = { xy -> rttyGetScope(xy) }
+        binding.rttyClearButton.setOnClickListener {
+            rttyPollText()  // drop anything not shown yet
+            rttyOutput.clear()
+        }
+        binding.rttySaveButton.setOnClickListener { saveLog(rttyOutput) }
+        applyRttyParams()
+    }
+
+    private fun applyRttyParams() {
+        showSelectedSegment(rttyBaudSegments, rttyBaudIndex)
+        showSelectedSegment(rttyShiftSegments, rttyShiftIndex)
+        setRttyParams(RTTY_BAUDS[rttyBaudIndex], RTTY_SHIFTS[rttyShiftIndex].toFloat(), binding.rttyInvertToggle.isChecked)
+    }
+
+    private fun pollRttyDecoder() {
+        val text = rttyPollText()
+        if (text.isNotEmpty()) rttyOutput.append(text)
+
+        rttyGetStatus(rttyStatus)
+        val signal = rttyStatus[1] > 0.5f
+        binding.rttyScope.signal = signal
+        binding.rttySnrText.text =
+            if (isRecording.get()) String.format(Locale.US, "%.0f dB", rttyStatus[0]) else "-- dB"
+        // Squelch open: the dot shows the current bit (green mark, orange space).
+        val color = when {
+            !signal -> CW_COLOR_IDLE
+            rttyStatus[2] > 0.5f -> RttyScopeView.MARK_COLOR
+            else -> RttyScopeView.SPACE_COLOR
+        }
+        binding.rttySignalIndicator.backgroundTintList = ColorStateList.valueOf(color)
+    }
+
+    /**
+     * A row of pill-shaped choices (one selected), like a segmented button. [onSelect] gets the
+     * index of the tapped one.
+     */
+    private fun buildSegments(
+        row: LinearLayout,
+        labels: Array<String>,
+        descriptions: List<String>,
+        out: MutableList<TextView>,
+        onSelect: (Int) -> Unit,
+    ) {
+        row.removeAllViews()
+        out.clear()
+        labels.forEachIndexed { index, label ->
+            val segment = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                textSize = 13f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                maxLines = 1
+                contentDescription = descriptions[index]
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onSelect(index) }
+            }
+            row.addView(segment, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                marginStart = if (index == 0) 0 else dp(4)
+            })
+            out.add(segment)
+        }
+    }
+
+    private fun showSelectedSegment(segments: List<TextView>, selected: Int) {
+        val primary = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorPrimary)
+        val onPrimary = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorOnPrimary)
+        segments.forEachIndexed { index, segment ->
+            val isSelected = index == selected
+            segment.isSelected = isSelected  // TalkBack reads "selected"
+            segment.background = GradientDrawable().apply {
+                cornerRadius = dp(100).toFloat()
+                if (isSelected) {
+                    setColor(primary)
+                } else {
+                    setColor(0x14FFFFFF)
+                    setStroke(dp(1), 0x40FFFFFF)
+                }
+            }
+            segment.setTextColor(if (isSelected) onPrimary else Color.WHITE)
+        }
+    }
+
+    private fun saveLog(output: DecoderText) {
+        if (output.isEmpty()) {
+            Toast.makeText(this, "Nothing decoded yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingSaveOutput = output
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        saveLogLauncher.launch("BelkaRx-${output.mode}-$stamp.txt")
+    }
+
+    private fun writeLog(uri: Uri, output: DecoderText) {
         val content = buildString {
-            append("BelkaRx CW log\n")
+            append("BelkaRx ${output.mode} log\n")
             append("Saved: ").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())).append('\n')
-            if (cwStatus[0] > 0f) append(String.format(Locale.US, "Last speed: %.0f WPM\n", cwStatus[0]))
+            append(output.details())
             append('\n')
-            append(cwLog)
+            append(output.log)
             append('\n')
         }
         try {
             contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
-            Toast.makeText(this, "CW log saved", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "${output.mode} log saved", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Log.e("BelkaRx", "Saving CW log failed: ${e.message}")
-            Toast.makeText(this, "Could not save the CW log", Toast.LENGTH_LONG).show()
+            Log.e("BelkaRx", "Saving ${output.mode} log failed: ${e.message}")
+            Toast.makeText(this, "Could not save the ${output.mode} log", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * Decoded text of one decoder: the full log for saving (each transmission starts on a new
+     * line with a timestamp, after a pause of at least [DECODER_NEW_LINE_PAUSE_MS]) and the tail
+     * shown in the strip, which can be scrolled back. The strip follows the newest text while
+     * scrolled to the bottom; scrolled up, it stays put so the text can be read.
+     */
+    private inner class DecoderText(
+        val mode: String,
+        private val view: TextView,
+        private val scroll: ScrollView,
+        val details: () -> String,
+    ) {
+        val log = StringBuilder()
+        private val display = StringBuilder()
+        private var lastTextMs = 0L
+        private var following = true
+
+        init {
+            // Scroll in the layout pass (before the frame is drawn), so new lines never jump.
+            val keepAtBottom = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                if (following) scroll.scrollTo(0, maxOf(0, view.height - scroll.height))
+            }
+            view.addOnLayoutChangeListener(keepAtBottom)
+            scroll.addOnLayoutChangeListener(keepAtBottom)
+            scroll.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                following = scrollY >= view.height - scroll.height - dp(8)
+            }
+        }
+
+        fun isEmpty() = log.isEmpty()
+
+        fun append(text: String) {
+            val now = System.currentTimeMillis()
+            if (log.isEmpty() || now - lastTextMs > DECODER_NEW_LINE_PAUSE_MS) {
+                if (log.isNotEmpty() && log.last() != '\n') log.append('\n')
+                log.append('[')
+                    .append(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(now)))
+                    .append("] ")
+                if (display.isNotEmpty() && display.last() != ' ' && display.last() != '\n') display.append(' ')
+            }
+            log.append(text)
+            display.append(text)
+            if (display.length > DECODER_DISPLAY_CHARS) {
+                // Drop a big chunk at once, so the wrapped lines reflow only rarely.
+                display.delete(0, display.length - DECODER_DISPLAY_CHARS / 2)
+            }
+            lastTextMs = now
+            show()
+        }
+
+        fun clear() {
+            log.setLength(0)
+            display.setLength(0)
+            following = true
+            show()
+        }
+
+        // The text view wraps the text; the scroll view shows the visible window.
+        fun show() {
+            view.text = display
         }
     }
 
@@ -494,11 +685,36 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun updateLayoutForOrientation(orientation: Int) {
-        // CW text strip: 3 lines in portrait, 2 in landscape where height is short.
-        binding.cwText.setLines(if (orientation == Configuration.ORIENTATION_LANDSCAPE) 2 else 3)
-        binding.cwText.post { showCwText() }
+        // Decoder text strips: 3 lines in portrait, 2 in landscape where height is short.
+        val landscape = orientation == Configuration.ORIENTATION_LANDSCAPE
+        // CW text scrolls: 3 visible lines in portrait, 2 in landscape.
+        binding.cwTextScroll.layoutParams = binding.cwTextScroll.layoutParams.apply {
+            height = binding.cwText.lineHeight * (if (landscape) 2 else 3)
+        }
         binding.cwScope.layoutParams = binding.cwScope.layoutParams.apply {
-            height = dp(if (orientation == Configuration.ORIENTATION_LANDSCAPE) 88 else 140)
+            height = dp(if (landscape) 88 else 140)
+        }
+        // RTTY text scrolls: 6 visible lines in portrait, 2 in landscape.
+        binding.rttyTextScroll.layoutParams = binding.rttyTextScroll.layoutParams.apply {
+            height = binding.rttyText.lineHeight * (if (landscape) 2 else 6)
+        }
+        binding.rttyScope.layoutParams = binding.rttyScope.layoutParams.apply {
+            height = dp(if (landscape) 88 else 140)
+        }
+        // RTTY settings: captions above the choices in portrait, beside them in landscape.
+        for (group in listOf(binding.rttyBaudGroup, binding.rttyShiftGroup)) {
+            group.orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            val caption = group.getChildAt(0)
+            caption.layoutParams = LinearLayout.LayoutParams(
+                if (landscape) dp(72) else ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = if (landscape) 0 else dp(2) }
+            val choices = group.getChildAt(1)
+            choices.layoutParams = LinearLayout.LayoutParams(
+                if (landscape) 0 else ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(32),
+                if (landscape) 1f else 0f,
+            )
         }
 
         val topContainer = binding.topBarCenterContainer
@@ -962,6 +1178,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
         editor.putBoolean("marker", binding.markerToggle.isChecked)
         editor.putBoolean("cw", binding.cwToggle.isChecked)
+        editor.putBoolean("rtty", binding.rttyToggle.isChecked)
+        editor.putInt("rttyBaud", rttyBaudIndex)
+        editor.putInt("rttyShift", rttyShiftIndex)
+        editor.putBoolean("rttyInvert", binding.rttyInvertToggle.isChecked)
         editor.putInt("demodMode", demodModeIndex)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
@@ -979,6 +1199,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
         val marker = prefs.getBoolean("marker", false)
         val cw = prefs.getBoolean("cw", false)
+        // Read before any toggle below is set: their listeners save the settings.
+        val rtty = prefs.getBoolean("rtty", false)
+        val rttyBaud = prefs.getInt("rttyBaud", DEFAULT_RTTY_BAUD_INDEX)
+        val rttyShift = prefs.getInt("rttyShift", DEFAULT_RTTY_SHIFT_INDEX)
+        val rttyInvert = prefs.getBoolean("rttyInvert", false)
         val demodMode = prefs.getInt("demodMode", 0)
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
@@ -991,6 +1216,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.showSpectrumToggle.isChecked = showSpectrum
         binding.markerToggle.isChecked = marker
         binding.cwToggle.isChecked = cw && marker
+        rttyBaudIndex = rttyBaud.coerceIn(0, RTTY_BAUDS.lastIndex)
+        rttyShiftIndex = rttyShift.coerceIn(0, RTTY_SHIFTS.lastIndex)
+        binding.rttyInvertToggle.isChecked = rttyInvert
+        applyRttyParams()
+        binding.rttyToggle.isChecked = rtty && marker && !cw
         binding.cwScope.thresholdDb = prefs.getFloat("cwThresholdDb", CwScopeView.DEFAULT_THRESHOLD_DB)
         setCwThresholdDb(binding.cwScope.thresholdDb)
         binding.cwScope.autoMode = prefs.getBoolean("cwThresholdAuto", true)
@@ -1073,6 +1303,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun setCwAutoThreshold(enabled: Boolean)
     private external fun getColorScalePreview(scale: Int, out: IntArray)
     private external fun cwGetScope(out: FloatArray, total: LongArray): Int
+    private external fun setRttyEnabled(enabled: Boolean)
+    private external fun setRttyParams(baud: Float, shiftHz: Float, invert: Boolean)
+    private external fun rttyPollText(): String
+    private external fun rttyGetStatus(out: FloatArray)
+    private external fun rttyGetScope(out: FloatArray): Int
     private external fun setSurfaceSize(width: Int, height: Int)
     private external fun setSensitivity(value: Int)
     private external fun setContrast(value: Int)
@@ -1114,11 +1349,19 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             "Classic Rainbow", "Light Blue", "Grayscale", "Cool-Hot", "Green Phosphor", "LCD",
         )
         private const val CW_POLL_INTERVAL_MS = 100L  // text and status; the graph pulls its own data
-        private const val CW_NEW_LINE_PAUSE_MS = 10_000L  // a pause this long starts a new log line
-        private const val CW_DISPLAY_CHARS = 2000
+        private const val DECODER_NEW_LINE_PAUSE_MS = 10_000L  // a pause this long starts a new log line
+        private const val DECODER_DISPLAY_CHARS = 10_000  // kept in the strip to scroll back through
         private const val CW_COLOR_KEY_DOWN = 0xFF4CE06A.toInt()
         private const val CW_COLOR_SIGNAL = 0xFF2E6B3A.toInt()
         private const val CW_COLOR_IDLE = 0xFF555555.toInt()
+
+        // RTTY: 45.45 Bd (amateur), 50 Bd (DWD weather and most utility stations), 75 Bd.
+        private val RTTY_BAUDS = floatArrayOf(45.45f, 50f, 75f)
+        private val RTTY_BAUD_LABELS = arrayOf("45", "50", "75")
+        private const val DEFAULT_RTTY_BAUD_INDEX = 1
+        // Shifts in Hz: 85 (narrow utility), 170 (amateur), 425 / 450 (DWD), 850 (wide utility).
+        private val RTTY_SHIFTS = intArrayOf(85, 170, 425, 450, 850)
+        private const val DEFAULT_RTTY_SHIFT_INDEX = 3
 
         init {
             System.loadLibrary("belkarx")

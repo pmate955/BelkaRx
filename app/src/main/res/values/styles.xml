@@ -49,6 +49,14 @@
         <item name="rippleColor">#33BB86FC</item>
     </style>
 
+    <!-- Small caption above (or beside) a group of decoder settings. -->
+    <style name="Widget.BelkaRx.Caption" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">#B3FFFFFF</item>
+        <item name="android:textSize">11sp</item>
+    </style>
+
     <!-- Flat, thicker slider without the dense tick marks. -->
     <style name="Widget.BelkaRx.Slider" parent="Widget.MaterialComponents.Slider">
         <item name="trackHeight">8dp</item>
