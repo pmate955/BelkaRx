@@ -14,12 +14,12 @@ void unpackIqSamples(const int16_t* interleavedIq, int fftSize, bool swapIq, std
     }
 }
 
-SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled, bool hasCustomZoomCenter, double customZoomCenterHz) {
+SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled, bool hasCustomZoomCenter, double customZoomCenterHz, bool deepZoom) {
     int baseBins = fftSize / 4;
     int minLogicalBin = -(baseBins / 2);
     int maxLogicalBin = minLogicalBin + baseBins - 1;
     if (zoomEnabled) {
-        int visibleBins = baseBins / 2;
+        int visibleBins = baseBins / (deepZoom ? 8 : 2);
         // Keep the historically watched IF frequency centered in zoom view.
         // Using double precision avoids integer truncation drift.
         constexpr double kZoomTrackedHz = 6350.0;

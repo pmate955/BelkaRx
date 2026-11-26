@@ -7,7 +7,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
     ColorScales.cpp
     DspHelpers.cpp
     RenderHelpers.cpp
-    GlWaterfall.cpp)
+    GlWaterfall.cpp
+    CwDecoder.cpp)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
     android

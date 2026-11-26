@@ -29,6 +29,13 @@ import android.widget.LinearLayout
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Toast
+import android.text.StaticLayout
+import android.content.res.ColorStateList
+import android.net.Uri
+import androidx.activity.result.contract.ActivityResultContracts
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.app.ActivityCompat
@@ -60,8 +67,33 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var longPressDownX = 0f
     private var longPressDownY = 0f
     private val markerLongPressTimeoutMs = 1000L
+
+    // CW decoder: full log (with a timestamp at the start of each transmission) for saving,
+    // and the plain text tail shown in the strip.
+    private val cwLog = StringBuilder()
+    private val cwDisplay = StringBuilder()
+    private var cwLastTextMs = 0L
+    private val cwStatus = FloatArray(6)
+    private val cwPollHandler = Handler(Looper.getMainLooper())
+    private val cwPollRunnable = object : Runnable {
+        override fun run() {
+            pollCwDecoder()
+            cwPollHandler.postDelayed(this, CW_POLL_INTERVAL_MS)
+        }
+    }
+    private val saveCwLogLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+            if (uri != null) writeCwLog(uri)
+        }
     private val markerLongPressMoveToleranceMultiplier = 3f
     private val markerLongPressRunnable = Runnable {
+        // In CW mode the decoder needs the marker: a long press (easy to do by accident while
+        // tuning) must not turn it off, which would also stop the decoder. The press simply
+        // keeps acting as a marker drag, and the marker still snaps to the signal on release.
+        if (binding.cwToggle.isChecked) {
+            Log.d("BelkaRx", "Waterfall long-press ignored in CW mode")
+            return@Runnable
+        }
         longPressTriggered = true
         val newState = !binding.markerToggle.isChecked
         binding.markerToggle.isChecked = newState
@@ -102,6 +134,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        cwPollHandler.removeCallbacks(cwPollRunnable)
         stopVsyncRenderLoop()
         renderHandler?.post { releaseRenderer() }
         renderThread?.quitSafely()
@@ -152,6 +185,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 MotionEvent.ACTION_UP,
                 MotionEvent.ACTION_CANCEL -> {
                     longPressHandler.removeCallbacks(markerLongPressRunnable)
+                    // With the CW decoder on, releasing the marker snaps it onto the nearest signal.
+                    if (event.actionMasked == MotionEvent.ACTION_UP && !longPressTriggered &&
+                        binding.markerToggle.isChecked && binding.cwToggle.isChecked) {
+                        snapMarkerToPeak()
+                    }
                 }
             }
 
@@ -233,8 +271,58 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
         binding.markerToggle.setOnCheckedChangeListener { _, isChecked ->
             setAdjustableMarkerEnabled(isChecked)
+            // The CW decoder listens at the marker, so it cannot run without one.
+            if (!isChecked && binding.cwToggle.isChecked) {
+                binding.cwToggle.isChecked = false
+            }
             saveSettings()
             Log.d("BelkaRx", "Marker checkbox changed: $isChecked")
+        }
+
+        binding.cwToggle.setOnCheckedChangeListener { _, isChecked ->
+            applyCwEnabled(isChecked)
+            saveSettings()
+            Log.d("BelkaRx", "CW decoder changed: $isChecked")
+        }
+
+        // Re-wrap the CW text whenever its width changes (first layout, rotation).
+        binding.cwText.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (right - left != oldRight - oldLeft) binding.cwText.post { showCwText() }
+        }
+
+        binding.cwPanel.addOnLayoutChangeListener { panel, _, _, _, _, _, _, _, _ ->
+            setOverlayBottomInset(if (panel.visibility == View.VISIBLE) panel.height else 0)
+        }
+
+        binding.cwScope.source = { levels, total -> cwGetScope(levels, total) }
+        binding.cwScope.onAutoChanged = { enabled ->
+            setCwAutoThreshold(enabled)
+            // Switching Auto off keeps the line where it was: that becomes the manual value.
+            if (!enabled) setCwThresholdDb(binding.cwScope.thresholdDb)
+            prefs.edit()
+                .putBoolean("cwThresholdAuto", enabled)
+                .putFloat("cwThresholdDb", binding.cwScope.thresholdDb)
+                .apply()
+        }
+        binding.cwScope.onThresholdChanged = { db, finished ->
+            setCwThresholdDb(db)
+            if (finished) prefs.edit().putFloat("cwThresholdDb", db).apply()
+        }
+
+        binding.cwClearButton.setOnClickListener {
+            cwPollText()  // drop anything not shown yet
+            cwLog.setLength(0)
+            cwDisplay.setLength(0)
+            showCwText()
+        }
+
+        binding.cwSaveButton.setOnClickListener {
+            if (cwLog.isEmpty()) {
+                Toast.makeText(this, "Nothing decoded yet", Toast.LENGTH_SHORT).show()
+            } else {
+                val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+                saveCwLogLauncher.launch("BelkaRx-CW-$stamp.txt")
+            }
         }
 
         binding.demodModeButton.setOnClickListener {
@@ -281,6 +369,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         setSpectrumConstantColor(binding.spectrumConstantColorToggle.isChecked)
         setColorScale(binding.colorScaleSpinner.selectedItemPosition)
         updateSpectrumOptionControlsEnabled(binding.showSpectrumToggle.isChecked)
+        applyCwEnabled(binding.cwToggle.isChecked)
         Log.d("BelkaRx", "Initial UI setup: Swap I/Q=${binding.swapIQToggle.isChecked}")
 
 
@@ -295,6 +384,100 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             applyImmersiveFullscreen()
+        }
+    }
+
+    private fun applyCwEnabled(enabled: Boolean) {
+        // The decoder listens at the marker, so turning CW on also turns the marker on.
+        if (enabled && !binding.markerToggle.isChecked) {
+            binding.markerToggle.isChecked = true
+        }
+        setCwEnabled(enabled)
+        binding.cwPanel.visibility = if (enabled) View.VISIBLE else View.GONE
+        binding.cwScope.running = enabled
+        if (!enabled) setOverlayBottomInset(0)  // when visible, the layout listener sets it
+        cwPollHandler.removeCallbacks(cwPollRunnable)
+        if (enabled) {
+            cwPollHandler.post(cwPollRunnable)
+        } else {
+            binding.cwKeyIndicator.backgroundTintList = ColorStateList.valueOf(CW_COLOR_IDLE)
+        }
+    }
+
+    private fun pollCwDecoder() {
+        val text = cwPollText()
+        if (text.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            if (cwLog.isEmpty() || now - cwLastTextMs > CW_NEW_LINE_PAUSE_MS) {
+                if (cwLog.isNotEmpty()) cwLog.append('\n')
+                cwLog.append('[')
+                    .append(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(now)))
+                    .append("] ")
+                if (cwDisplay.isNotEmpty() && cwDisplay.last() != ' ') cwDisplay.append(' ')
+            }
+            cwLog.append(text)
+            cwDisplay.append(text)
+            if (cwDisplay.length > CW_DISPLAY_CHARS) {
+                // Drop a big chunk at once, so the wrapped lines reflow only rarely.
+                cwDisplay.delete(0, cwDisplay.length - CW_DISPLAY_CHARS / 2)
+            }
+            cwLastTextMs = now
+            showCwText()
+        }
+
+        cwGetStatus(cwStatus)
+        binding.cwScope.cutDb = cwStatus[4]
+        binding.cwScope.autoThresholdDb = cwStatus[5]
+        val wpm = cwStatus[0]
+        binding.cwWpmText.text = if (wpm > 0f) String.format(Locale.US, "%.0f WPM", wpm) else "-- WPM"
+        val color = when {
+            cwStatus[2] > 0.5f -> CW_COLOR_KEY_DOWN
+            cwStatus[3] > 0.5f -> CW_COLOR_SIGNAL
+            else -> CW_COLOR_IDLE
+        }
+        binding.cwKeyIndicator.backgroundTintList = ColorStateList.valueOf(color)
+    }
+
+    // Shows the newest decoded text, word-wrapped, in the strip's fixed number of lines.
+    // The wrapping is computed here (same paint and width as the view) and only the last lines
+    // are set as text, so nothing has to be scrolled afterwards; scrolling one frame later made
+    // the text jump whenever a new line started.
+    private fun showCwText() {
+        val view = binding.cwText
+        val width = view.width - view.totalPaddingLeft - view.totalPaddingRight
+        if (width <= 0) {
+            // Not laid out yet (panel just shown or rotated): try again after layout.
+            view.text = cwDisplay
+            if (view.visibility == View.VISIBLE && binding.cwPanel.visibility == View.VISIBLE) {
+                view.post { if (view.width > 0) showCwText() }
+            }
+            return
+        }
+        val layout = StaticLayout.Builder.obtain(cwDisplay, 0, cwDisplay.length, view.paint, width)
+            .setIncludePad(view.includeFontPadding)
+            .setBreakStrategy(view.breakStrategy)
+            .setHyphenationFrequency(view.hyphenationFrequency)
+            .setLineSpacing(view.lineSpacingExtra, view.lineSpacingMultiplier)
+            .build()
+        val firstLine = maxOf(0, layout.lineCount - view.maxLines)
+        view.text = cwDisplay.substring(layout.getLineStart(firstLine))
+    }
+
+    private fun writeCwLog(uri: Uri) {
+        val content = buildString {
+            append("BelkaRx CW log\n")
+            append("Saved: ").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())).append('\n')
+            if (cwStatus[0] > 0f) append(String.format(Locale.US, "Last speed: %.0f WPM\n", cwStatus[0]))
+            append('\n')
+            append(cwLog)
+            append('\n')
+        }
+        try {
+            contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+            Toast.makeText(this, "CW log saved", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("BelkaRx", "Saving CW log failed: ${e.message}")
+            Toast.makeText(this, "Could not save the CW log", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -318,6 +501,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     }
 
     private fun updateLayoutForOrientation(orientation: Int) {
+        // CW text strip: 3 lines in portrait, 2 in landscape where height is short.
+        binding.cwText.setLines(if (orientation == Configuration.ORIENTATION_LANDSCAPE) 2 else 3)
+        binding.cwText.post { showCwText() }
+        binding.cwScope.layoutParams = binding.cwScope.layoutParams.apply {
+            height = dp(if (orientation == Configuration.ORIENTATION_LANDSCAPE) 88 else 140)
+        }
+
         val topContainer = binding.topBarCenterContainer
         val dropdownContainer = binding.dropdownDynamicArea
         val controlsContainer = binding.controlsContainer
@@ -625,7 +815,17 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             }
             recordingThread?.start()
 
-            binding.statusText.text = "Status: AudioRecord Stereo UNPROCESSED @ ${sampleRate/1000}k"
+            // Without UNPROCESSED support Android may hand over a processed (AGC-ed) signal,
+            // which makes the noise floor rise whenever a strong signal stops.
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val rawInputSupported =
+                audioManager.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true"
+            Log.i("BelkaRx", "UNPROCESSED audio source supported: $rawInputSupported")
+            binding.statusText.text = if (rawInputSupported) {
+                "Status: AudioRecord Stereo UNPROCESSED @ ${sampleRate/1000}k"
+            } else {
+                "Status: AudioRecord Stereo @ ${sampleRate/1000}k (raw input not supported, AGC may apply)"
+            }
             Log.i("BelkaRx", "AudioRecord started successfully with UNPROCESSED source at $sampleRate Hz")
             true
         } catch (e: Exception) {
@@ -777,6 +977,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         editor.putBoolean("zoom", binding.zoomToggle.isChecked)
         editor.putBoolean("showSpectrum", binding.showSpectrumToggle.isChecked)
         editor.putBoolean("marker", binding.markerToggle.isChecked)
+        editor.putBoolean("cw", binding.cwToggle.isChecked)
         editor.putInt("demodMode", demodModeIndex)
         editor.putBoolean("spectrumFilled", binding.spectrumFilledToggle.isChecked)
         editor.putBoolean("spectrumConstantColor", binding.spectrumConstantColorToggle.isChecked)
@@ -793,6 +994,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val zoom = prefs.getBoolean("zoom", false)
         val showSpectrum = prefs.getBoolean("showSpectrum", false)
         val marker = prefs.getBoolean("marker", false)
+        val cw = prefs.getBoolean("cw", false)
         val demodMode = prefs.getInt("demodMode", 0)
         val spectrumFilled = prefs.getBoolean("spectrumFilled", false)
         val spectrumConstantColor = prefs.getBoolean("spectrumConstantColor", false)
@@ -805,6 +1007,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         binding.zoomToggle.isChecked = zoom
         binding.showSpectrumToggle.isChecked = showSpectrum
         binding.markerToggle.isChecked = marker
+        binding.cwToggle.isChecked = cw && marker
+        binding.cwScope.thresholdDb = prefs.getFloat("cwThresholdDb", CwScopeView.DEFAULT_THRESHOLD_DB)
+        setCwThresholdDb(binding.cwScope.thresholdDb)
+        binding.cwScope.autoMode = prefs.getBoolean("cwThresholdAuto", true)
+        setCwAutoThreshold(binding.cwScope.autoMode)
         demodModeIndex = demodMode.coerceIn(0, demodModeLabels.lastIndex)
         updateDemodModeButtonText()
         binding.spectrumFilledToggle.isChecked = spectrumFilled
@@ -878,6 +1085,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private external fun renderFrame(frameTimeNanos: Long)
     private external fun releaseRenderSurface()
     private external fun releaseRenderer()
+    private external fun setCwEnabled(enabled: Boolean)
+    private external fun setOverlayBottomInset(pixels: Int)
+    private external fun snapMarkerToPeak(): Boolean
+    private external fun cwPollText(): String
+    private external fun cwGetStatus(out: FloatArray)
+    private external fun setCwThresholdDb(db: Float)
+    private external fun setCwAutoThreshold(enabled: Boolean)
+    private external fun cwGetScope(out: FloatArray, total: LongArray): Int
     private external fun setSurfaceSize(width: Int, height: Int)
     private external fun setSensitivity(value: Int)
     private external fun setContrast(value: Int)
@@ -914,6 +1129,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         private const val FFT_SIZE = 4096          // stereo frames per FFT window
         private const val HOP_SIZE = 2048          // 50% overlap; must match kHopSize in native-lib.cpp
         private const val READ_CHUNK_FRAMES = 1024 // stereo frames per AudioRecord.read()
+
+        private const val CW_POLL_INTERVAL_MS = 100L  // text and status; the graph pulls its own data
+        private const val CW_NEW_LINE_PAUSE_MS = 10_000L  // a pause this long starts a new log line
+        private const val CW_DISPLAY_CHARS = 2000
+        private const val CW_COLOR_KEY_DOWN = 0xFF4CE06A.toInt()
+        private const val CW_COLOR_SIGNAL = 0xFF2E6B3A.toInt()
+        private const val CW_COLOR_IDLE = 0xFF555555.toInt()
 
         init {
             System.loadLibrary("belkarx")

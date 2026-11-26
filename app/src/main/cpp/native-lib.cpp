@@ -20,6 +20,7 @@
 #include "DspHelpers.h"
 #include "RenderHelpers.h"
 #include "GlWaterfall.h"
+#include "CwDecoder.h"
 
 #define LOG_TAG "BelkaRx-Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -40,6 +41,8 @@ bool zoomEnabled = false;
 bool zoomCenteredFromTouch = false;
 double zoomCenterFrequencyHz = 0.0;
 bool adjustableMarkerEnabled = false;
+bool cwDecoderEnabled = false;   // decode Morse at the adjustable marker frequency
+int overlayBottomInset = 0;      // pixels at the bottom covered by the CW text strip
 double adjustableMarkerFrequencyHz = 0.0;
 int demodMode = 0;  // 0=AM, 1=USB, 2=LSB
 bool showSpectrumEnabled = false;
@@ -85,6 +88,13 @@ static std::shared_ptr<WaterfallRing> loadRing() {
     return g_ring;
 }
 
+// CW decoder: fed on the audio thread, polled from the UI thread (takeText/status are thread-safe).
+static CwDecoder g_cwDecoder;
+
+// Smoothed power per FFT bin (natural FFT order), used to snap the marker onto a nearby signal.
+static std::mutex g_snapMutex;
+static std::vector<float> g_snapPower;
+
 // Measured waterfall row rate (rows per second), written by the audio thread.
 static std::atomic<double> g_rowsPerSecond{192000.0 / kHopSize};
 
@@ -106,6 +116,8 @@ struct RenderConfigSnapshot {
     bool showSpectrum;
     bool spectrumFilled;
     bool spectrumConstantColor;
+    bool cwEnabled;
+    int bottomInset;
 };
 
 int getWaterfallRows(int height) {
@@ -188,7 +200,9 @@ RenderConfigSnapshot snapshotRenderConfigLocked() {
         fixedWindowEnabled,
         showSpectrumEnabled,
         isSpectrumFilled,
-        isSpectrumConstantColor};
+        isSpectrumConstantColor,
+        cwDecoderEnabled,
+        overlayBottomInset};
 }
 
 bool sameRenderConfig(const RenderConfigSnapshot& a, const RenderConfigSnapshot& b) {
@@ -265,7 +279,8 @@ void computeCurrentViewWindowHz(double& outViewStartHz, double& outViewSpanHz) {
         currentSampleRate,
         zoomEnabled,
         zoomCenteredFromTouch,
-        zoomCenterFrequencyHz);
+        zoomCenterFrequencyHz,
+        cwDecoderEnabled);
     double binHz = static_cast<double>(currentSampleRate) / static_cast<double>(kFftSize);
     outViewStartHz = static_cast<double>(scaleSpan.startBin) * binHz;
     outViewSpanHz = static_cast<double>(scaleSpan.visibleBins) * binHz;
@@ -398,8 +413,10 @@ extern "C" JNIEXPORT void JNICALL
 Java_hu_ha8mz_belkarx_MainActivity_setZoom(JNIEnv* env, jobject /* this */, jboolean enabled) {
     std::lock_guard<std::mutex> lock(g_mutex);
     zoomEnabled = (enabled == JNI_TRUE);
-    zoomCenteredFromTouch = false;
-    LOGI("setZoom: %s", zoomEnabled ? "true (centered @+6.2kHz)" : "false (±24kHz @DC)");
+    // In CW mode, zoom in around the decoder's marker instead of the fixed IF frequency.
+    zoomCenteredFromTouch = zoomEnabled && cwDecoderEnabled && adjustableMarkerEnabled;
+    if (zoomCenteredFromTouch) zoomCenterFrequencyHz = adjustableMarkerFrequencyHz;
+    LOGI("setZoom: %s", zoomEnabled ? "true" : "false (±24kHz @DC)");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -595,7 +612,10 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int he
         return;
     }
 
-    constexpr double kTickStepHz = 5000.0;
+    // Narrow views (CW zoom) get a tick and a label every kHz; wider ones every 5 kHz / 10 kHz.
+    const bool fineScale = viewSpanHz < 10000.0;
+    const double kTickStepHz = fineScale ? 1000.0 : 5000.0;
+    const int labelEveryKHz = fineScale ? 1 : 10;
     double viewEndHz = viewStartHz + viewSpanHz;
     double firstRelativeHz = std::ceil((viewStartHz - referenceFrequencyHz) / kTickStepHz) * kTickStepHz;
     double lastRelativeHz = std::floor((viewEndHz - referenceFrequencyHz) / kTickStepHz) * kTickStepHz;
@@ -606,7 +626,7 @@ static void drawFrequencyGridLines(uint32_t* dest, int stride, int width, int he
         if (pixelX < 0 || pixelX >= width) continue;
 
         int relativeKHz = static_cast<int>(std::lround(relativeHz / 1000.0));
-        bool majorTick = (relativeKHz % 10) == 0;
+        bool majorTick = (relativeKHz % labelEveryKHz) == 0;
         int lineHeight = majorTick ? 20 : 10;
 
         if (relativeKHz != 0) {
@@ -830,15 +850,35 @@ Java_hu_ha8mz_belkarx_MainActivity_processAudioData(JNIEnv* env, jobject, jshort
     unpackIqSamples(samples.data(), fftSize, config.swapIq, real, imag);
     unpackNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count();
 
+    // CW decoder: windows overlap by 50%, so only the newest hop is new audio.
+    thread_local bool cwWasRunning = false;
+    bool cwRunning = config.cwEnabled && config.adjustableMarkerEnabled;
+    if (cwRunning) {
+        if (!cwWasRunning) g_cwDecoder.reset();
+        g_cwDecoder.configure(config.sampleRate, config.adjustableMarkerFrequencyHz);
+        g_cwDecoder.process(&real[fftSize - kHopSize], &imag[fftSize - kHopSize], kHopSize);
+    }
+    cwWasRunning = cwRunning;
+
     auto fftStart = Clock::now();
     fft(real, imag);
     fftNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - fftStart).count();
+
+    if (config.adjustableMarkerEnabled) {
+        std::lock_guard<std::mutex> snapLock(g_snapMutex);
+        if (g_snapPower.size() != static_cast<size_t>(fftSize)) g_snapPower.assign(fftSize, 0.0f);
+        for (int k = 0; k < fftSize; k++) {
+            float power = real[k] * real[k] + imag[k] * imag[k];
+            g_snapPower[k] += (power - g_snapPower[k]) * 0.3f;
+        }
+    }
 
     std::shared_ptr<WaterfallRing> ring = loadRing();
     if (!ring || ring->width <= 0 || ring->visibleRows <= 0) return;
     const int width = ring->width;
 
-    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz);
+    SpectrumSpan span = computeSpectrumSpan(fftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter,
+                                            config.zoomCenterHz, config.cwEnabled);
 
     double minMag = 1e9, maxMag = -1e9;
     thread_local std::vector<double> lineMags;
@@ -1004,14 +1044,15 @@ bool sameOverlayConfig(const RenderConfigSnapshot& a, const RenderConfigSnapshot
     return a.sampleRate == b.sampleRate && a.zoom == b.zoom && a.zoomHasCustomCenter == b.zoomHasCustomCenter &&
            a.zoomCenterHz == b.zoomCenterHz && a.demodMode == b.demodMode &&
            a.adjustableMarkerEnabled == b.adjustableMarkerEnabled &&
-           a.adjustableMarkerFrequencyHz == b.adjustableMarkerFrequencyHz;
+           a.adjustableMarkerFrequencyHz == b.adjustableMarkerFrequencyHz &&
+           a.showSpectrum == b.showSpectrum && a.cwEnabled == b.cwEnabled && a.bottomInset == b.bottomInset;
 }
 
 // Draws the frequency scale, the demod marker and the adjustable marker into `dest`.
 void drawOverlayMarks(uint32_t* dest, int width, int height, const RenderConfigSnapshot& config) {
     constexpr int kFftSize = 4096;
     SpectrumSpan scaleSpan = computeSpectrumSpan(
-        kFftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz);
+        kFftSize, config.sampleRate, config.zoom, config.zoomHasCustomCenter, config.zoomCenterHz, config.cwEnabled);
     double binHz = static_cast<double>(config.sampleRate) / static_cast<double>(kFftSize);
 
     double referenceFrequencyHz = computeReferenceFrequencyHz(width, config.sampleRate, config.demodMode);
@@ -1022,8 +1063,22 @@ void drawOverlayMarks(uint32_t* dest, int width, int height, const RenderConfigS
     if (mx >= width) mx = width - 1;
 
     drawArrowMarkerOnWindow(dest, width, width, height, mx, 0, viewStartHz, viewSpanHz, referenceFrequencyHz, config.demodMode);
+    // Keep the marker and its label above the CW text strip.
+    int markerHeight = std::max(kTopMargin + 40, height - config.bottomInset);
+    if (config.adjustableMarkerEnabled && config.cwEnabled && !config.showSpectrum && viewSpanHz > 1e-9) {
+        // Translucent green band showing the decoder's 100 Hz channel.
+        constexpr double kHalfBandwidthHz = 50.0;
+        constexpr uint32_t kBandColor = 0x5000FF40u;  // ABGR: green, ~30% opacity
+        int x1 = static_cast<int>(std::floor((config.adjustableMarkerFrequencyHz - kHalfBandwidthHz - viewStartHz) / viewSpanHz * width));
+        int x2 = static_cast<int>(std::ceil((config.adjustableMarkerFrequencyHz + kHalfBandwidthHz - viewStartHz) / viewSpanHz * width));
+        x1 = std::max(0, x1);
+        x2 = std::min(width - 1, std::max(x2, x1 + 2));
+        for (int y = kTopMargin; y < markerHeight; y++) {
+            for (int x = x1; x <= x2; x++) dest[static_cast<size_t>(y) * width + x] = kBandColor;
+        }
+    }
     if (config.adjustableMarkerEnabled) {
-        drawAdjustableMarker(dest, width, width, height, viewStartHz, viewSpanHz,
+        drawAdjustableMarker(dest, width, width, markerHeight, viewStartHz, viewSpanHz,
                              config.adjustableMarkerFrequencyHz, referenceFrequencyHz);
     }
 }
@@ -1154,6 +1209,123 @@ Java_hu_ha8mz_belkarx_MainActivity_releaseRenderer(JNIEnv*, jobject) {
     g_overlayValid = false;
     g_pacer = ScrollPacer{};
     g_rowsUploaded = 0;
+}
+
+// ============================================================================
+// CW decoder controls (UI thread)
+// ============================================================================
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setCwEnabled(JNIEnv*, jobject, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    cwDecoderEnabled = (enabled == JNI_TRUE);
+    // Turning CW on with zoom already on: the narrower CW zoom window is centered on the marker.
+    if (cwDecoderEnabled && zoomEnabled && adjustableMarkerEnabled && !zoomCenteredFromTouch) {
+        zoomCenteredFromTouch = true;
+        zoomCenterFrequencyHz = adjustableMarkerFrequencyHz;
+    }
+    LOGI("setCwEnabled: %s", cwDecoderEnabled ? "true" : "false");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setOverlayBottomInset(JNIEnv*, jobject, jint pixels) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    overlayBottomInset = pixels > 0 ? pixels : 0;
+}
+
+// Moves the marker onto the strongest signal within +-100 Hz (sub-bin accurate).
+// Returns false if there is no spectrum yet.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_snapMarkerToPeak(JNIEnv*, jobject) {
+    constexpr int kFftSize = 4096;
+    constexpr double kSearchHz = 100.0;
+    double markerHz;
+    int sampleRate;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!adjustableMarkerEnabled || currentSampleRate <= 0) return JNI_FALSE;
+        markerHz = adjustableMarkerFrequencyHz;
+        sampleRate = currentSampleRate;
+    }
+    double binHz = static_cast<double>(sampleRate) / kFftSize;
+    int center = static_cast<int>(std::lround(markerHz / binHz));
+    int reach = std::max(1, static_cast<int>(std::ceil(kSearchHz / binHz)));
+
+    double peakHz;
+    {
+        std::lock_guard<std::mutex> snapLock(g_snapMutex);
+        if (g_snapPower.size() != static_cast<size_t>(kFftSize)) return JNI_FALSE;
+        auto powerAt = [](int logicalBin) {
+            int index = ((logicalBin % kFftSize) + kFftSize) % kFftSize;
+            return g_snapPower[index];
+        };
+        int best = center;
+        float bestPower = -1.0f;
+        for (int k = center - reach; k <= center + reach; k++) {
+            float power = powerAt(k);
+            if (power > bestPower) {
+                bestPower = power;
+                best = k;
+            }
+        }
+        if (bestPower <= 0.0f) return JNI_FALSE;
+        // Parabolic interpolation on the log power of the peak and its neighbours.
+        double l = std::log(powerAt(best - 1) + 1e-20);
+        double c = std::log(bestPower + 1e-20);
+        double r = std::log(powerAt(best + 1) + 1e-20);
+        double denom = l - 2.0 * c + r;
+        double delta = (denom < 0.0) ? 0.5 * (l - r) / denom : 0.0;
+        delta = std::clamp(delta, -0.5, 0.5);
+        peakHz = (best + delta) * binHz;
+    }
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    adjustableMarkerFrequencyHz = peakHz;
+    LOGI("snapMarkerToPeak: %.1f Hz -> %.1f Hz", markerHz, peakHz);
+    return JNI_TRUE;
+}
+
+// Decoded text since the previous call.
+extern "C" JNIEXPORT jstring JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_cwPollText(JNIEnv* env, jobject) {
+    std::string text = g_cwDecoder.takeText();
+    return env->NewStringUTF(text.c_str());
+}
+
+// Fills out[0..5] with WPM, SNR (dB), key down (0/1), signal present (0/1),
+// keying cut level (dB over noise), squelch in use (dB over noise).
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_cwGetStatus(JNIEnv* env, jobject, jfloatArray out) {
+    if (out == nullptr || env->GetArrayLength(out) < 6) return;
+    CwStatus status = g_cwDecoder.status();
+    jfloat values[6] = {status.wpm, status.snrDb, status.keyDown ? 1.0f : 0.0f, status.signal ? 1.0f : 0.0f,
+                        status.effectiveThresholdDb, status.squelchDb};
+    env->SetFloatArrayRegion(out, 0, 6, values);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setCwAutoThreshold(JNIEnv*, jobject, jboolean enabled) {
+    g_cwDecoder.setAutoThreshold(enabled == JNI_TRUE);
+}
+
+// Squelch level of the CW decoder, dB above the noise floor.
+extern "C" JNIEXPORT void JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_setCwThresholdDb(JNIEnv*, jobject, jfloat db) {
+    g_cwDecoder.setThresholdDb(db);
+}
+
+// Copies the newest level history (dB over noise, 100 points/s, oldest first) into `out` and
+// the number of points produced so far into total[0]. Returns the number of points copied.
+extern "C" JNIEXPORT jint JNICALL
+Java_hu_ha8mz_belkarx_MainActivity_cwGetScope(JNIEnv* env, jobject, jfloatArray out, jlongArray total) {
+    if (out == nullptr || total == nullptr || env->GetArrayLength(total) < 1) return 0;
+    int capacity = std::min(static_cast<int>(env->GetArrayLength(out)), CwDecoder::kScopePoints);
+    float points[CwDecoder::kScopePoints];
+    int64_t produced = 0;
+    int count = g_cwDecoder.copyScope(points, capacity, produced);
+    env->SetFloatArrayRegion(out, 0, count, points);
+    jlong producedValue = produced;
+    env->SetLongArrayRegion(total, 0, 1, &producedValue);
+    return count;
 }
 
 extern "C" JNIEXPORT void JNICALL

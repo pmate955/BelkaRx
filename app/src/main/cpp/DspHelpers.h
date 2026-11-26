@@ -9,7 +9,8 @@ struct SpectrumSpan {
 };
 
 void unpackIqSamples(const int16_t* interleavedIq, int fftSize, bool swapIq, std::vector<float>& real, std::vector<float>& imag);
-SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled, bool hasCustomZoomCenter, double customZoomCenterHz);
+// deepZoom (CW mode): a 4x narrower zoom window (6 kHz instead of 24 kHz) for picking weak, narrow signals.
+SpectrumSpan computeSpectrumSpan(int fftSize, int sampleRate, bool zoomEnabled, bool hasCustomZoomCenter, double customZoomCenterHz, bool deepZoom = false);
 void computeLineMagnitudes(
     const std::vector<float>& real,
     const std::vector<float>& imag,

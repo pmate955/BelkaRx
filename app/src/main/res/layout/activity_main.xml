@@ -176,6 +176,18 @@
                 android:textOff="Mono"
                 android:textOn="Mono" />
 
+            <ToggleButton
+                style="@style/Widget.BelkaRx.Toggle"
+                android:id="@+id/cwToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:checked="false"
+                android:contentDescription="CW decoder"
+                android:minWidth="48dp"
+                android:textOff="CW"
+                android:textOn="CW" />
+
         </LinearLayout>
 
     </LinearLayout>
@@ -189,6 +201,100 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/controlsContainer" />
+
+    <!-- CW decoder output, drawn over the bottom of the waterfall (oldest history). -->
+    <LinearLayout
+        android:id="@+id/cwPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="#CC000000"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- Signal level over time; drag to set the squelch threshold. Height set from code. -->
+        <hu.ha8mz.belkarx.CwScopeView
+            android:id="@+id/cwScope"
+            android:layout_width="match_parent"
+            android:layout_height="140dp"
+            android:layout_marginBottom="6dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:minWidth="56dp"
+                android:orientation="vertical">
+
+                <View
+                    android:id="@+id/cwKeyIndicator"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:background="@drawable/bg_cw_key_indicator" />
+
+                <TextView
+                    android:id="@+id/cwWpmText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:fontFamily="monospace"
+                    android:text="-- WPM"
+                    android:textColor="#B3FFFFFF"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Fixed number of lines (3 portrait, 2 landscape, set from code); scrolled to the newest text. -->
+            <TextView
+                android:id="@+id/cwText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:fontFamily="monospace"
+                android:lines="3"
+                android:scrollbars="none"
+                android:textColor="@android:color/white"
+                android:textSize="16sp" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:orientation="vertical">
+
+                <Button
+                    style="@style/Widget.BelkaRx.ModeButton"
+                    android:id="@+id/cwClearButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minWidth="0dp"
+                    android:minHeight="36dp"
+                    android:text="Clear" />
+
+                <Button
+                    style="@style/Widget.BelkaRx.ModeButton"
+                    android:id="@+id/cwSaveButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:minWidth="0dp"
+                    android:minHeight="36dp"
+                    android:text="Save" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
 
     <!-- Views to be moved dynamically -->
     <LinearLayout
